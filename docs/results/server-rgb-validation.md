@@ -1,5 +1,7 @@
 # Native RGB/text integration — 2026-10-18
 
+Historical `rgb64-joint-v1` results at source commit `92df61c`. The current model is batched `v2`; see [its validation record](server-batched-validation.md). Reproducing this older run requires its original source/runtime fingerprints.
+
 This validates the execution and recovery pipeline, **not general generation quality**. All model weights start randomly; Python performs transport, image codecs, file validation and process orchestration only. Forward computation, byte token encoding, attention, autodiff, Adam, EMA and DDPM sampling are Camel programs running through explicit Tiles CUDA calls.
 
 - Host: `88zjwei` / `tangshan88`; project: `/home/zjwei/projects/Camel-DDPM`.

@@ -3,7 +3,7 @@ import { Model, embedding, load_model } from ddpm
 import { init_text_image, patches, pixels, differentiate_rgb, forward_rgb } from text_image
 import { DeviceModel, upload_model, download_model, zero_model, update } from gpu
 import { text_features, rgb64 } from text_data
-import { Tensor, seed, randn, sum, abs, set_num_threads } from tensor
+import { Tensor, seed, randn, sum, abs, set_num_threads, reshape, concat } from tensor
 import { read_text } from fs
 import { save_params } from nn
 import { run, run_device, download } from tiles
@@ -28,9 +28,10 @@ func steps(m: DeviceModel, mu: DeviceModel, nu: DeviceModel, x: Tensor<f32>, tex
 func main(image: string, caption: string, out: string): int sync {
     set_num_threads(1)
     seed(101)
-    let target = rgb64(image)
-    let text = text_features(read_text(caption))
-    let x = target * 0.7 + randn([3, 64, 64]) * 0.7
+    let first = reshape(rgb64(image), [1, 3, 64, 64])
+    let target = concat(first, -first, 0)
+    let text = concat(reshape(text_features(read_text(caption)), [1, 64, 259]), reshape(text_features('A blue boat'), [1, 64, 259]), 0)
+    let x = target * 0.7 + randn([2, 3, 64, 64]) * 0.7
     let m = init_text_image()
     let cpu = differentiate_rgb(m, x, text, time49(), target)
     let gpu = run<differentiate_rgb>((m, x, text, time49(), target))
@@ -45,7 +46,7 @@ func main(image: string, caption: string, out: string): int sync {
     let loaded = upload_model(load_model(out + '/model'))
     let a = run<forward_rgb>((trained, x, text, time49()))
     let b = run<forward_rgb>((loaded, x, text, time49()))
-    let c = run<forward_rgb>((loaded, x, text_features('A red bird on a branch'), time49()))
+    let c = run<forward_rgb>((loaded, x, reshape(text_features('A red bird on a branch'), [1, 64, 259]), time49()))
     let reload_error = sum(abs(a - b))
     let prompt_change = sum(abs(b - c))
     println('RGB CHECK gradient_l1={} text_gradient_l1={} layout_error={} before={} after={} reload_error={} prompt_change={}'->format<gradient_error, text_gradient, layout_error, cpu.0, download(after.0), reload_error, prompt_change>)

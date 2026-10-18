@@ -11,4 +11,6 @@ if [[ -f "$CAMEL_HOME/libs/libstdc++.so.6" && -f "$CAMEL_HOME/libs/libgcc_s.so.1
     export LD_PRELOAD="$CAMEL_HOME/libs/libstdc++.so.6:$CAMEL_HOME/libs/libgcc_s.so.1${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
 mkdir -p runs/checks
-"$CAMEL_HOME/bin/camel" tests/attention_checks.cml std::macro std::fvm 2>&1 | tee runs/checks/attention_checks.log
+for check in attention_checks multihead_checks; do
+    "$CAMEL_HOME/bin/camel" "tests/$check.cml" std::macro std::fvm 2>&1 | tee "runs/checks/$check.log"
+done

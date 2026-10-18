@@ -11,7 +11,11 @@ their regression cases, test plan and technical note:
 - `modules/math/module.cpp`: f32/f64 scalar sqrt VJP, registered by math.
 - `modules/fs/operators.cpp`: length-aware binary output and write/close error detection.
 - `modules/tiles/src/compiler.cpp`: specialize tensor numel/shape using concrete
-  invocation shapes; lower inverse permutations through the core layout instance.
+  invocation shapes; lower inverse permutations through the core layout instance;
+  compose batched matrix pullbacks, including the shared-RHS FMA chain.
+- `modules/tiles/src/matmul_kernel.cpp` and `schedule.cpp`: rank-2 and higher
+  matrix products, core-defined batch broadcasting and independent batched CUDA
+  tiles. Vector products remain unsupported; no precision permissions are added.
 
 Apply and build using Camel's normal build workflow, then install the collected
 distribution into this project:
@@ -33,11 +37,19 @@ have already landed upstream, do not reapply the patch; install a distribution
 with the fixes and run the numerical tests.
 
 The patch includes regression cases and the test plan
-`test/plans/feat/modules/ddpm_primitives.plan.toml` (15 NVM/FVM/JIT checks).
+`test/plans/feat/modules/ddpm_primitives.plan.toml` (18 NVM/FVM/JIT checks).
 They cover scalar sqrt gradients, an
 embedded-NUL/high-byte file round trip and CUDA source specialization of the
 mean/layout gradients with changing input shapes and negative permutation axes. The numerical square-root rule is
-tested in the differentiable positive domain.
+tested in the differentiable positive domain. Batch cases also cover changed
+batch sizes, shared projections, broadcast dimensions and partial tiles. Run
+`camel --arg run_gpu=true test/cases/modules/tiles/batch_matmul.cml std::macro std::fvm`
+to compare actual CUDA forward/gradient values and directional finite differences.
+
+The batched runtime was built and verified on `88zjwei`; the workstation runtime
+has not been rebuilt. The remote project keeps its previous runtime under
+`.camel-pre-batched-92df61c/`. Build into a fresh directory with
+`CAMEL_INSTALL_ROOT` when validating an update before activation.
 
 No patched binaries or source checkout are needed after installation: `.camel/`
 is a complete independent runtime snapshot. The installation manifest records

@@ -2,13 +2,13 @@
 
 目标是用 Camel 从零训练通用中英文文生图模型，数据、构建与训练均放在 `ssh 88zjwei`。所有学习组件随机初始化，不使用预训练权重。完整目标、数据来源、能力缺口和验收条件见 [从零训练说明](docs/from-scratch.md)。
 
-当前已验证的生成模型仍是下方的 28×28 MNIST 原型；新增 RGB64 图文模型用于检查原生注意力、文本条件和 GPU 梯度，不代表生产级模型已经完成。
+已验证的路径包括下方的 28×28 MNIST 原型，以及支持四头注意力、批量训练和恢复的 RGB64 图文模型；后者仍用于验证底层能力，不代表生产级模型已经完成。
 
 **当前状态：已在远程 RTX 3090 上跑通训练和采样，背景噪点明显减少，但仍有断笔和块状接缝。** 这个仓库首先是 Camel 能力与缺口的可复现实验。
 
 ![Remote patch-x0 model after 5,000 updates](docs/results/server-patch-5000.png)
 
-最新实验：[服务器验证记录](docs/results/server-patch-validation.md)。旧 MLP 基线见下方验证结果。
+最新 RGB 实验：[批量注意力与恢复验证](docs/results/server-batched-validation.md)。MNIST 实验见 [服务器验证记录](docs/results/server-patch-validation.md)。旧 MLP 基线见下方验证结果。
 
 ## 实现范围
 
@@ -27,7 +27,7 @@ CPU 仍负责 IDX 读取、随机噪声、时间/调度系数、少量加噪与�
 
 需要 Windows PowerShell 和包含 Tiles 的完整 Camel 分发目录。CUDA 执行还需要 NVIDIA 驱动及匹配的 NVRTC 运行库；仅 GPU 检测成功并不保证每张图可编译。
 
-目前实验依赖三项 Camel 库修复，见 [runtime/README.md](runtime/README.md)。可用修复后的分发目录安装一次：
+实验依赖的 Camel 库修复与批量矩阵乘扩展见 [runtime/README.md](runtime/README.md)。可用包含这些改动的分发目录安装一次：
 
 ```powershell
 .\tools\install-runtime.ps1 -Distribution D:\path\to\camel-distribution
@@ -69,7 +69,7 @@ CPU 仍负责 IDX 读取、随机噪声、时间/调度系数、少量加噪与�
 默认每次 GPU 更新后暂停 10 毫秒、CPU 张量线程数为 1，并降低启动进程优先级。
 `-DelayMs` 可增加暂停时间；Ctrl+C 可终止。默认不自动启动长期任务。CPU 路径需显式指定 `-Device cpu`，该路径默认也只有一个张量线程。
 
-每次运行写入 `runs/<name>/`：`config.json`、日志、`metrics.json`、`timing.json`、`checkpoint/*.npy`、`samples.npy`、`samples.pgm` 和 `trajectory_*.pgm`。当前只保存模型权重，不支持恢复 Adam 状态继续训练。短跑只能验证流程，不代表模型收敛。
+每次 MNIST 运行写入 `runs/<name>/`：`config.json`、日志、`metrics.json`、`timing.json`、`checkpoint/*.npy`、`samples.npy`、`samples.pgm` 和 `trajectory_*.pgm`。这些 MNIST 入口只保存模型权重，不支持恢复 Adam 状态；RGB 入口 `tools/text-image.py` 会保存模型、Adam、EMA 和训练进度并支持续训。短跑只能验证流程，不代表模型收敛。
 
 PNG 预览是可选步骤，无需它也能训练、采样和输出图片：
 

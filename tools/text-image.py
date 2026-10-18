@@ -124,7 +124,7 @@ def train(args):
         dataset = args.dataset.resolve()
         manifest_hash, index_hash = snapshot_data(dataset, run)
         gpu = subprocess.check_output(["nvidia-smi", "-i", args.gpu, "--query-gpu=uuid", "--format=csv,noheader"], text=True).strip()
-        config = {"schema": 1, "model": "rgb64-joint-v1", "objective": "x0_mse",
+        config = {"schema": 1, "model": "rgb64-joint-v2", "objective": "x0_mse", "batch": args.batch,
                   "seed": args.seed, "rate": args.rate, "timesteps": args.timesteps,
                   "dataset": str(dataset), "manifest_sha256": manifest_hash,
                   "train_index_sha256": index_hash, "fingerprints": fingerprints(),
@@ -150,7 +150,7 @@ def train(args):
             run_native("src/train_text_image.cml", {
                 "data": dataset, "index": run / "train_ids.txt", "out": stage,
                 "resume": previous if previous else "", "start": start, "end": end,
-                "timesteps": args.timesteps, "initial_seed": args.seed, "rate": args.rate,
+                "timesteps": args.timesteps, "initial_seed": args.seed, "rate": args.rate, "batch_size": args.batch,
             }, stage / "train.log", args.gpu)
             hashes = validate_arrays(stage)
             for relative in hashes:
@@ -200,6 +200,7 @@ def main():
     training.add_argument("--out", type=Path, required=True)
     training.add_argument("--steps", type=int, default=20)
     training.add_argument("--checkpoint-every", type=int, default=10)
+    training.add_argument("--batch", type=int, default=2)
     training.add_argument("--timesteps", type=int, default=100)
     training.add_argument("--seed", type=int, default=20261018)
     training.add_argument("--rate", type=float, default=0.001)
@@ -216,7 +217,7 @@ def main():
     for command in (training, sampling):
         command.add_argument("--gpu", default="2")
     args = parser.parse_args()
-    if args.command == "train" and (args.steps < 1 or args.checkpoint_every < 1 or args.timesteps < 2 or not math.isfinite(args.rate) or args.rate <= 0 or args.seed < 0):
+    if args.command == "train" and (args.steps < 1 or args.batch < 1 or args.checkpoint_every < 1 or args.timesteps < 2 or not math.isfinite(args.rate) or args.rate <= 0 or args.seed < 0):
         parser.error("invalid training sizes, seed or rate")
     if args.command == "sample" and (not math.isfinite(args.guidance) or args.guidance < 0 or args.seed < 0):
         parser.error("invalid guidance or seed")

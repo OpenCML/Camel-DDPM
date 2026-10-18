@@ -3,7 +3,7 @@ import { Model, Schedule, embedding, schedule, load_model } from ddpm
 import { init_text_image, differentiate_rgb, average_rgb } from text_image
 import { DeviceModel, upload_model, download_model, zero_model, update } from gpu
 import { rgb64, text_features } from text_data
-import { Tensor, seed, randn, set_num_threads } from tensor
+import { Tensor, seed, randn, set_num_threads, reshape, concat } from tensor
 import { randint, seed as random_seed } from random
 import { sqrt } from math
 import { read_text } from fs
@@ -12,28 +12,40 @@ import { save_params } from nn
 import { run_device, download } from tiles
 
 type State = { model: DeviceModel, mu: DeviceModel, nu: DeviceModel, ema: DeviceModel }
+type Batch = { images: Tensor<f32>, text: Tensor<f32> }
 
-func train(state: State, ids: string[], data: string, s: Schedule, i: int, end: int, initial_seed: int, rate: float): State sync {
+func item(ids: string[], data: string): Batch sync {
+    let id = ids[randint(0, len(ids) - 1)]
+    let clean = rgb64(data + '/rgb64/' + id + '.rgb')
+    let caption = if randint(0, 9) == 0 then '' else read_text(data + '/rgb64/' + id + '.caption.txt')
+    return { images: reshape(clean, [1, 3, 64, 64]), text: reshape(text_features(caption), [1, 64, 259]) }
+}
+
+func batch(ids: string[], data: string, remaining: int, value: Batch): Batch sync {
+    return if remaining == 0 then value else sync {
+        let next = item(ids, data)
+        return batch(ids, data, remaining - 1, { images: concat(value.images, next.images, 0), text: concat(value.text, next.text, 0) })
+    }
+}
+
+func train(state: State, ids: string[], data: string, s: Schedule, i: int, end: int, initial_seed: int, rate: float, batch_size: int): State sync {
     return if i == end then state else sync {
         // Stateless step seeding makes restart independent of earlier draws.
         // The global step also determines Adam bias corrections and data order.
         seed(initial_seed + i + 1)
         random_seed(initial_seed + i + 1)
-        let id = ids[randint(0, len(ids) - 1)]
-        let clean = rgb64(data + '/rgb64/' + id + '.rgb')
-        let caption = if randint(0, 9) == 0 then '' else read_text(data + '/rgb64/' + id + '.caption.txt')
-        let text = text_features(caption)
+        let input = batch(ids, data, batch_size - 1, item(ids, data))
         let t = randint(0, len(s.beta) - 1)
-        let noisy = clean * sqrt(s.abar[t]) + randn([3, 64, 64]) * sqrt(1.0 - s.abar[t])
-        let vg = run_device<differentiate_rgb>((state.model, noisy, text, embedding(t) as Tensor<f32>, clean))
+        let noisy = input.images * sqrt(s.abar[t]) + randn([batch_size, 3, 64, 64]) * sqrt(1.0 - s.abar[t])
+        let vg = run_device<differentiate_rgb>((state.model, noisy, input.text, embedding(t) as Tensor<f32>, input.images))
         let next = run_device<update>((state.model, vg.1, state.mu, state.nu, rate, 1.0 - 0.9 ^ float(i + 1), 1.0 - 0.999 ^ float(i + 1)))
         let ema = run_device<average_rgb>((state.ema, next.0))
-        println('RGB DDPM step={} t={} x0_mse={} caption_bytes={}'->format<i + 1, t, download(vg.0), len(caption)>)
-        return train({ model: next.0, mu: next.1, nu: next.2, ema: ema }, ids, data, s, i + 1, end, initial_seed, rate)
+        println('RGB DDPM step={} t={} x0_mse={} batch={}'->format<i + 1, t, download(vg.0), batch_size>)
+        return train({ model: next.0, mu: next.1, nu: next.2, ema: ema }, ids, data, s, i + 1, end, initial_seed, rate, batch_size)
     }
 }
 
-func main(data: string, index: string, out: string, resume: string, start: int, end: int, timesteps: int, initial_seed: int, rate: float): int sync {
+func main(data: string, index: string, out: string, resume: string, start: int, end: int, timesteps: int, initial_seed: int, rate: float, batch_size: int): int sync {
     set_num_threads(1)
     seed(initial_seed)
     let host = if resume == '' then init_text_image() else load_model(resume + '/model')
@@ -42,7 +54,7 @@ func main(data: string, index: string, out: string, resume: string, start: int, 
     let nu = upload_model(if resume == '' then zero_model(host) else load_model(resume + '/adam_v'))
     let ema = upload_model(if resume == '' then host else load_model(resume + '/ema'))
     let ids = read_text(index)->trim->split<'\n'>
-    let trained = train({ model: model, mu: mu, nu: nu, ema: ema }, ids, data, schedule(timesteps), start, end, initial_seed, rate)
+    let trained = train({ model: model, mu: mu, nu: nu, ema: ema }, ids, data, schedule(timesteps), start, end, initial_seed, rate, batch_size)
     save_params(download_model(trained.model), out + '/model')
     save_params(download_model(trained.mu), out + '/adam_m')
     save_params(download_model(trained.nu), out + '/adam_v')

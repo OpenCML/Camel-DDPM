@@ -77,7 +77,7 @@ index 9b756f08..d7890293 100644
      return true;
  }
 diff --git a/modules/tiles/src/compiler.cpp b/modules/tiles/src/compiler.cpp
-index f0d02a19..53fa7df0 100644
+index f0d02a19..d3fa2661 100644
 --- a/modules/tiles/src/compiler.cpp
 +++ b/modules/tiles/src/compiler.cpp
 @@ -185,6 +185,16 @@ class Compiler {
@@ -150,6 +150,240 @@ index f0d02a19..53fa7df0 100644
          std::vector<ty::Type *> types;
          std::vector<std::optional<ConstArg>> constants;
          for (const auto &v : args) {
+@@ -733,33 +782,39 @@ class Compiler {
+             return {.type = *inferred, .tensor = append(std::move(n))};
+         }
+         if (n.op == "matmul_grad_lhs" || n.op == "matmul_grad_rhs") {
+-            size_t dy  = tensorValue(args.at(0));
+-            size_t lhs = tensorValue(args.at(1)), rhs = tensorValue(args.at(2));
+-            const auto a = program.nodes[lhs].shape, b = program.nodes[rhs].shape;
+-            if (a.size() != 2 || b.size() != 2)
+-                throw UnsupportedComputation("tiles matmul gradient requires rank 2");
+-            const bool left   = n.op == "matmul_grad_lhs";
+-            const auto &shape = left ? b : a;
+-            size_t transposed = append(
+-                Node{
+-                    .op      = "reindex",
+-                    .shape   = {shape[1], shape[0]},
+-                    .inputs  = {left ? rhs : lhs},
+-                    .strides = {1, size_t(shape[1])}});
+-            n.op = "matmul";
+-            n.inputs =
+-                left ? std::vector<size_t>{dy, transposed} : std::vector<size_t>{transposed, dy};
+-            // The physical primitive has its own indexing/law, not the three-operand
+-            // gradient operator's instance. Keep both contracts in the dependency set.
+-            static const auto matmulId = core::OperatorTable::instance().intern("tensor:matmul");
+-            std::vector<Value> matrixArgs;
+-            for (auto in : n.inputs)
+-                matrixArgs.push_back(
+-                    {.type =
+-                         tensor::TensorType::get(ty::TypeCode::Float32, program.nodes[in].shape)});
+-            n.indexing = instance(matmulId, matrixArgs);
+-            n.semantic = contract(matmulId);
+-            return {.type = *inferred, .tensor = append(std::move(n))};
++            const auto a = program.nodes[tensorValue(args.at(1))].shape;
++            const auto b = program.nodes[tensorValue(args.at(2))].shape;
++            if (a.size() < 2 || b.size() < 2)
++                throw UnsupportedComputation("tiles matmul gradient requires rank >= 2");
++            // Compose existing tensor primitives, retaining their core instances
++            // and contracts rather than inventing a separate batched index law.
++            auto apply = [&](const char *uri, std::vector<Value> values) {
++                const auto op = core::OperatorTable::instance().intern(uri);
++                const auto first = program.nodes.size();
++                const auto indexed = instance(op, values);
++                auto value = operation(op, values, indexed);
++                const auto semantic = contract(op);
++                for (size_t i = first; i < program.nodes.size(); ++i)
++                    if (program.nodes[i].semantic == SIZE_MAX)
++                        program.nodes[i].semantic = semantic;
++                if (value.tensor >= first && !program.nodes[value.tensor].indexing)
++                    program.nodes[value.tensor].indexing = indexed;
++                return value;
++            };
++            const bool left = n.op == "matmul_grad_lhs";
++            Value lhs = args[1], rhs = args[2], dy = args[0];
++            if (!left && b.size() == 2) {
++                // Match the Tensor CPU gradient's canonical GEMM: a shared RHS
++                // accumulates over batch and row in one ascending FMA chain.
++                // Per-batch GEMMs followed by sum_to would round differently.
++                const auto rows = static_cast<int64_t>(elements(a) / std::max<int64_t>(a.back(), 1));
++                lhs = apply("tensor:reshape", {lhs, integerArray({rows, a.back()})});
++                dy = apply("tensor:reshape", {dy, integerArray({rows, b.back()})});
++            }
++            auto transposed = apply("tensor:transpose", {left ? rhs : lhs});
++            auto product = apply("tensor:matmul", left ? std::vector<Value>{dy, transposed}
++                                                       : std::vector<Value>{transposed, dy});
++            return apply("tensor:sum_to", {product, args[left ? 1 : 2]});
+         }
+         const std::string unary  = "|neg|abs|exp|log|sqrt|rsqrt|relu|";
+         const std::string binary = "|add|subtract|multiply|divide|maximum|minimum|";
+@@ -767,9 +822,9 @@ class Compiler {
+             n.inputs = {tensorValue(args.at(0))};
+         } else if (binary.find("|" + n.op + "|") != std::string::npos || n.op == "matmul") {
+             n.inputs = {tensorValue(args.at(0)), tensorValue(args.at(1))};
+-            if (n.op == "matmul" && (program.nodes[n.inputs[0]].shape.size() != 2 ||
+-                                     program.nodes[n.inputs[1]].shape.size() != 2))
+-                throw UnsupportedComputation("tiles matmul currently requires two rank-2 tensors");
++            if (n.op == "matmul" && (program.nodes[n.inputs[0]].shape.size() < 2 ||
++                                     program.nodes[n.inputs[1]].shape.size() < 2))
++                throw UnsupportedComputation("tiles matmul requires tensors with rank >= 2");
+         } else if (n.op == "sum_axis" || n.op == "max_axis" || n.op == "mean_axis") {
+             n.inputs          = {tensorValue(args.at(0))};
+             int64_t axis      = integer(args.at(1));
+diff --git a/modules/tiles/src/matmul_kernel.cpp b/modules/tiles/src/matmul_kernel.cpp
+index 24f8e043..587ce2b8 100644
+--- a/modules/tiles/src/matmul_kernel.cpp
++++ b/modules/tiles/src/matmul_kernel.cpp
+@@ -35,19 +35,19 @@ void matrixContract(const Program &p, const Node &n, const Shape &domain) {
+         inst.extents() == std::optional<Shape>(domain) && inst.norm.size() == 2 &&
+             inst.with.empty() && inst.domain.guard.empty(),
+         "unsupported iteration domain");
++    require(domain.size() >= 3, "matrix domain rank");
++    for (size_t d = 0; d < domain.size(); ++d)
++        require(inst.domain.dims[d].role == (d + 1 == domain.size() ? sem::DimRole::Reduction
++                                                                : sem::DimRole::Parallel),
++                "unsupported dimension roles");
+     require(
+-        inst.domain.dims[0].role == sem::DimRole::Parallel &&
+-            inst.domain.dims[1].role == sem::DimRole::Parallel &&
+-            inst.domain.dims[2].role == sem::DimRole::Reduction,
+-        "unsupported dimension roles");
+-    require(
+-        sem::holds(inst, inst.domain.constraints, std::vector<int64_t>(3)),
++        sem::holds(inst, inst.domain.constraints, std::vector<int64_t>(domain.size())),
+         "unsatisfied domain constraints");
+     require(
+         inst.output.mode == sem::WriteMode::Combine && !inst.output.indirect &&
+-            inst.output.valid.empty() && inst.output.coords.size() == 2,
++            inst.output.valid.empty() && inst.output.coords.size() + 1 == domain.size(),
+         "unsupported output map");
+-    for (size_t d = 0; d < 2; ++d) {
++    for (size_t d = 0; d < inst.output.coords.size(); ++d) {
+         const auto &e = inst.exprs[inst.output.coords[d]];
+         require(
+             e.op == sem::ExprOp::Dim && e.value == static_cast<int64_t>(d),
+@@ -65,15 +65,18 @@ void matrixContract(const Program &p, const Node &n, const Shape &domain) {
+     const auto lhs = sem::rowMajorView(inst, inst.norm[0], p.nodes[n.inputs[0]].shape);
+     const auto rhs = sem::rowMajorView(inst, inst.norm[1], p.nodes[n.inputs[1]].shape);
+     require(
+-        lhs && rhs && lhs->strides[1] == 0 && rhs->strides[0] == 0,
++        lhs && rhs && lhs->strides[domain.size() - 2] == 0 && rhs->strides[domain.size() - 3] == 0,
+         "cross-output dependence prevents tiled sharing");
+ }
+ } // namespace
+ void validateMatmulContract(const Program &p, const Node &n) {
+     const auto &a = p.nodes.at(n.inputs.at(0)).shape;
+     const auto &b = p.nodes.at(n.inputs.at(1)).shape;
+-    matrixContract(p, n, {a.at(0), b.at(1), a.at(1)});
+-    const std::vector<IndexExpr> point(3, IndexExpr(0));
++    require(a.size() >= 2 && b.size() >= 2 && n.shape.size() >= 2, "operand rank");
++    auto domain = n.shape;
++    domain.push_back(a.back());
++    matrixContract(p, n, domain);
++    const std::vector<IndexExpr> point(domain.size(), IndexExpr(0));
+     (void)affineAddress(*n.indexing, n.indexing->norm[0], a, point);
+     (void)affineAddress(*n.indexing, n.indexing->norm[1], b, point);
+ }
+@@ -82,14 +85,15 @@ KernelBody matmulBody(const Program &p, Launch &launch) {
+     const auto &n  = p.nodes.at(id);
+     const auto &a  = p.nodes.at(n.inputs.at(0)).shape;
+     const auto &b  = p.nodes.at(n.inputs.at(1)).shape;
+-    const size_t m = a.at(0), k = a.at(1), cols = b.at(1);
++    const size_t m = a.at(a.size() - 2), k = a.back(), cols = b.back();
+     validateMatmulContract(p, n);
+     const size_t gx = (cols + 15) / 16, gy = (m + 15) / 16;
+-    if (gx > 2147483647 || gy > 65535)
++    const auto batches = elements(Shape(n.shape.begin(), n.shape.end() - 2));
++    if (gx > 2147483647 || gy > 65535 || (gy && batches > 65535 / gy))
+         throw std::runtime_error("matrix launch exceeds CUDA grid limits");
+     launch.blockX = launch.blockY = 16;
+     launch.gridX                  = static_cast<unsigned>(std::max(gx, size_t(1)));
+-    launch.gridY                  = static_cast<unsigned>(std::max(gy, size_t(1)));
++    launch.gridY                  = static_cast<unsigned>(std::max(gy * batches, size_t(1)));
+     KernelBody result;
+     result.buffers = {
+         {MemorySpace::Global, DType::F32, n.inputs[0], elements(a), false},
+@@ -97,10 +101,28 @@ KernelBody matmulBody(const Program &p, Launch &launch) {
+         {MemorySpace::Global, DType::F32, id, elements(n.shape), true},
+         {MemorySpace::Shared, DType::F32, 0, 256, true},
+         {MemorySpace::Shared, DType::F32, 1, 256, true}};
++    // No operand access is valid for an empty output batch. Emit a no-op body.
++    if (!elements(n.shape)) {
++        validateBody(result);
++        return result;
++    }
+     const auto tx = IndexExpr::variable("thread_x"), ty = IndexExpr::variable("thread_y");
+     const auto row = IndexExpr::variable("k_row"), col = IndexExpr::variable("k_col");
+     const auto base = IndexExpr::variable("k_base"), t = IndexExpr::variable("k_t");
+     const auto ak = base + tx, bk = base + ty;
++    // Flatten batch and row tiles into grid Y. Logical batch coordinates feed
++    // the existing core maps, including singleton and unequal-rank broadcasts.
++    std::vector<IndexExpr> point;
++    auto batch = IndexExpr::variable("block_y") / IndexExpr(gy);
++    for (size_t d = 0; d + 2 < n.shape.size(); ++d) {
++        const auto stride = elements(Shape(n.shape.begin() + d + 1, n.shape.end() - 2));
++        point.push_back((batch / IndexExpr(stride)) % IndexExpr(n.shape[d]));
++    }
++    const auto matrixPoint = [&](IndexExpr r, IndexExpr c, IndexExpr reduction) {
++        auto coordinates = point;
++        coordinates.insert(coordinates.end(), {r, c, reduction});
++        return coordinates;
++    };
+     const auto zero = ScalarValue::f32(0);
+     auto symbol     = [](const char *name) { return ScalarExpr::symbol(name, DType::F32); };
+     // The canonical FMA chain keeps one accumulator across tiles. Padding is
+@@ -117,13 +139,13 @@ KernelBody matmulBody(const Program &p, Launch &launch) {
+         Load{
+             "k_a",
+             {0,
+-             affineAddress(*n.indexing, n.indexing->norm[0], a, {row, IndexExpr(0), ak}),
++             affineAddress(*n.indexing, n.indexing->norm[0], a, matrixPoint(row, IndexExpr(0), ak)),
+              Predicate::less(row, IndexExpr(m)) && Predicate::less(ak, IndexExpr(k))},
+             zero},
+         Load{
+             "k_b",
+             {1,
+-             affineAddress(*n.indexing, n.indexing->norm[1], b, {IndexExpr(0), col, bk}),
++             affineAddress(*n.indexing, n.indexing->norm[1], b, matrixPoint(IndexExpr(0), col, bk)),
+              Predicate::less(bk, IndexExpr(k)) && Predicate::less(col, IndexExpr(cols))},
+             zero},
+         Store{{3, ty * IndexExpr(16) + tx, Predicate(true)}, symbol("k_a")},
+@@ -138,7 +160,7 @@ KernelBody matmulBody(const Program &p, Launch &launch) {
+             true},
+         Barrier{}};
+     result.statements = {
+-        IndexBinding{"k_row", IndexExpr::variable("block_y") * IndexExpr(16) + ty},
++        IndexBinding{"k_row", (IndexExpr::variable("block_y") % IndexExpr(gy)) * IndexExpr(16) + ty},
+         IndexBinding{"k_col", IndexExpr::variable("block_x") * IndexExpr(16) + tx},
+         ScalarBinding{"k_acc", ScalarExpr::literal(zero)},
+         Loop{"k_base", IndexExpr(0), IndexExpr(k), 16, std::move(tile)},
+@@ -148,7 +170,7 @@ KernelBody matmulBody(const Program &p, Launch &launch) {
+                  *n.indexing,
+                  sem::Access{.kind = sem::AccessKind::Affine, .coords = n.indexing->output.coords},
+                  n.shape,
+-                 {row, col, IndexExpr(0)}),
++                 matrixPoint(row, col, IndexExpr(0))),
+              Predicate::less(row, IndexExpr(m)) && Predicate::less(col, IndexExpr(cols))},
+             symbol("k_acc")}};
+     validateBody(result);
+diff --git a/modules/tiles/src/schedule.cpp b/modules/tiles/src/schedule.cpp
+index bcc96edf..9e6e2e82 100644
+--- a/modules/tiles/src/schedule.cpp
++++ b/modules/tiles/src/schedule.cpp
+@@ -304,8 +304,11 @@ void validate(const Program &p, InputBindings bindings) {
+             require(elements(a) == count, "reshape element count");
+         if (n.op == "matmul") {
+             const auto &b = p.nodes[n.inputs[1]].shape;
+-            require(a.size() == 2 && b.size() == 2, "matmul rank");
+-            require(a[1] == b[0] && n.shape == Shape{a[0], b[1]}, "matmul dimensions");
++            require(a.size() >= 2 && b.size() >= 2, "matmul rank");
++            auto output = broadcast(Shape(a.begin(), a.end() - 2), Shape(b.begin(), b.end() - 2));
++            output.push_back(a[a.size() - 2]);
++            output.push_back(b.back());
++            require(a.back() == b[b.size() - 2] && n.shape == output, "matmul dimensions");
+             kernel::validateMatmulContract(p, n);
+         }
+         if (n.op == "sum_to")
 diff --git a/test/cases/modules/autodiff/math_sqrt.cml b/test/cases/modules/autodiff/math_sqrt.cml
 new file mode 100644
 --- /dev/null
@@ -197,32 +431,6 @@ new file mode 100644
 +    println('binary size={} whole={} middle={}'->format<file_size(path), whole, middle>)
 +    return if file_size(path) == 8 && len(whole) == 8 && len(middle) == 6 then 0 else 1
 +}
-diff --git a/test/cases/modules/tiles/mean_grad.cml b/test/cases/modules/tiles/mean_grad.cml
-new file mode 100644
---- /dev/null
-+++ b/test/cases/modules/tiles/mean_grad.cml
-@@ -0,0 +1,21 @@
-+// Mean's pullback queries numel; specialize that query from the invocation shape.
-+module tiles_mean_grad
-+import { Tensor, reshape, mean, abs, sum } from tensor
-+import { grad } from autodiff
-+import { run, source } from tiles
-+func mse(x: Tensor<f32>): float { return mean(x * x) }
-+func main(run_gpu: bool): int sync {
-+    let x = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
-+    let derivative = grad(mse)
-+    let y = reshape([1.0, 2.0], [1, 2])
-+    let first = source<derivative>(x)
-+    let second = source<derivative>(y)
-+    if len(first) == 0 || len(second) == 0 || first == second then sync { exit(1) }
-+    println('mean_grad shape specialization PASS')
-+    if run_gpu then sync {
-+        let gpu = run<derivative>(x)
-+        println('mean_grad error={}'->format<sum(abs(gpu - derivative(x)))>)
-+        println('mean_grad changed_shape={}'->format<sum(abs(run<derivative>(y) - derivative(y)))>)
-+    }
-+    return 0
-+}
 diff --git a/test/cases/modules/tiles/layout_grad.cml b/test/cases/modules/tiles/layout_grad.cml
 new file mode 100644
 --- /dev/null
@@ -263,11 +471,99 @@ new file mode 100644
 +    }
 +    return 0
 +}
+diff --git a/test/cases/modules/tiles/mean_grad.cml b/test/cases/modules/tiles/mean_grad.cml
+new file mode 100644
+--- /dev/null
++++ b/test/cases/modules/tiles/mean_grad.cml
+@@ -0,0 +1,21 @@
++// Mean's pullback queries numel; specialize that query from the invocation shape.
++module tiles_mean_grad
++import { Tensor, reshape, mean, abs, sum } from tensor
++import { grad } from autodiff
++import { run, source } from tiles
++func mse(x: Tensor<f32>): float { return mean(x * x) }
++func main(run_gpu: bool): int sync {
++    let x = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
++    let derivative = grad(mse)
++    let y = reshape([1.0, 2.0], [1, 2])
++    let first = source<derivative>(x)
++    let second = source<derivative>(y)
++    if len(first) == 0 || len(second) == 0 || first == second then sync { exit(1) }
++    println('mean_grad shape specialization PASS')
++    if run_gpu then sync {
++        let gpu = run<derivative>(x)
++        println('mean_grad error={}'->format<sum(abs(gpu - derivative(x)))>)
++        println('mean_grad changed_shape={}'->format<sum(abs(run<derivative>(y) - derivative(y)))>)
++    }
++    return 0
++}
+diff --git a/test/cases/modules/tiles/batch_matmul.cml b/test/cases/modules/tiles/batch_matmul.cml
+new file mode 100644
+--- /dev/null
++++ b/test/cases/modules/tiles/batch_matmul.cml
+@@ -0,0 +1,57 @@
++module batch_matmul_checks
++import { Tensor, randn, seed, sum, mean, abs, reshape, shape, set_num_threads } from tensor
++import { value_and_grad } from autodiff
++import { run, source } from tiles
++
++type Pair = { a: Tensor<f32>, b: Tensor<f32> }
++func pair(a: Tensor<f32>, b: Tensor<f32>): Pair { return { a: a, b: b } }
++func product(a: Tensor<f32>, b: Tensor<f32>): Tensor<f32> { return a @ b }
++with <w: Pair>
++func loss(target: Tensor<f32>): float {
++    let e = w.a @ w.b - target
++    return mean(e * e)
++}
++func derivative(w: Pair, target: Tensor<f32>): (float, Pair) {
++    return value_and_grad(loss)<w>(target)
++}
++func check(name: string, a: Tensor<f32>, b: Tensor<f32>, target: Tensor<f32>, run_gpu: bool): int sync {
++    let w = pair(a, b)
++    let code = source<derivative>((w, target))
++    if len(code) == 0 then sync { exit(1) }
++    if run_gpu then sync {
++        let forward_error = sum(abs(run<product>((a, b)) - a @ b))
++        let cpu = derivative(w, target)
++        let gpu = run<derivative>((w, target))
++        let gradient_error = sum(abs(cpu.1.a - gpu.1.a)) + sum(abs(cpu.1.b - gpu.1.b))
++        let plus = pair(a + 0.001, b - 0.001)
++        let minus = pair(a - 0.001, b + 0.001)
++        let fd = (loss<plus>(target) - loss<minus>(target)) / 0.002
++        let fd_error = sum(abs(reshape([fd - sum(gpu.1.a) + sum(gpu.1.b)], [1])))
++        println('BATCH {} forward_l1={} gradient_l1={} directional_error={}'->format<name, forward_error, gradient_error, fd_error>)
++        if forward_error > 0.0001 || gradient_error > 0.0001 || fd_error > 0.002 then sync { exit(1) }
++    }
++    return 0
++}
++func main(run_gpu: bool): int sync {
++    set_num_threads(1)
++    seed(173)
++    check('equal3', randn([2, 3, 4]), randn([2, 4, 5]), randn([2, 3, 5]), run_gpu)
++    check('changed_batch', randn([3, 3, 4]), randn([3, 4, 5]), randn([3, 3, 5]), run_gpu)
++    check('equal4', randn([2, 3, 4, 5]), randn([2, 3, 5, 6]), randn([2, 3, 4, 6]), run_gpu)
++    check('rhs_matrix', randn([2, 3, 4]), randn([4, 5]), randn([2, 3, 5]), run_gpu)
++    check('lhs_matrix', randn([3, 4]), randn([2, 4, 5]), randn([2, 3, 5]), run_gpu)
++    check('broadcast4', randn([2, 1, 3, 4]), randn([1, 3, 4, 5]), randn([2, 3, 3, 5]), run_gpu)
++    check('tail_tiles', randn([2, 17, 19]), randn([2, 19, 18]), randn([2, 17, 18]), run_gpu)
++    if run_gpu then sync {
++        let a = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0], [2, 2, 3])
++        let expected = reshape([22.0, 28.0, 49.0, 64.0, 220.0, 244.0, 301.0, 334.0], [2, 2, 2])
++        let known_error = sum(abs(run<product>((a, reshape(a, [2, 3, 2]))) - expected))
++        if known_error != 0.0 then sync { exit(1) }
++        let empty_k = run<product>((randn([2, 3, 0]), randn([2, 0, 4])))
++        if sum(abs(empty_k)) != 0.0 then sync { exit(1) }
++        let empty_batch = run<product>((randn([0, 3, 4]), randn([1, 4, 5])))
++        if shape(empty_batch)[0] != 0 then sync { exit(1) }
++    }
++    println('BATCH MATMUL CHECKS PASS')
++    return 0
++}
 diff --git a/test/plans/feat/modules/ddpm_primitives.plan.toml b/test/plans/feat/modules/ddpm_primitives.plan.toml
 new file mode 100644
 --- /dev/null
 +++ b/test/plans/feat/modules/ddpm_primitives.plan.toml
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,49 @@
 +id = "modules.ddpm_primitives"
 +order = 375
 +tier = "feat"
@@ -310,11 +606,18 @@ new file mode 100644
 +args = ["--arg", "run_gpu=false", "${case}", "std::macro", "${backend}"]
 +envs = ["CAMEL_TILES_DEVICE=invalid"]
 +expect_stdout_contains = ["layout_grad shape specialization PASS"]
++
++[[tests]]
++name = "tiles.batch_matmul.source"
++case = "../../../cases/modules/tiles/batch_matmul.cml"
++args = ["--arg", "run_gpu=false", "${case}", "std::macro", "${backend}"]
++envs = ["CAMEL_TILES_DEVICE=invalid"]
++expect_stdout_contains = ["BATCH MATMUL CHECKS PASS"]
 diff --git a/docs/technical/ddpm-primitives.md b/docs/technical/ddpm-primitives.md
 new file mode 100644
 --- /dev/null
 +++ b/docs/technical/ddpm-primitives.md
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,62 @@
 +# DDPM experiment: missing runtime primitives
 +
 +The standalone Camel-DDPM experiment exposed missing scalar/file primitives and
@@ -341,6 +644,17 @@ new file mode 100644
 +  inverse permutation through the core `tensor:permute` index instance. Both
 +  operator contracts remain dependencies of the generated plan. Negative axes
 +  are normalized and malformed permutations are rejected.
++- Tiles lowers rank-2 and higher matrix products using the existing Tensor core
++  index instance, including singleton and unequal-rank batch broadcasting. Batch
++  coordinates are decoded from grid Y and passed through the core access maps;
++  no alternative broadcasting convention is introduced. Ascending f32 FMA
++  accumulation remains unchanged. Empty output batches perform no operand reads;
++  an empty contraction stores the positive-zero initial accumulator.
++- Matrix pullbacks compose transpose, matmul and sum-to through those same
++  primitives. A shared rank-2 RHS uses the CPU gradient's flattened batch/row
++  GEMM, preserving its single FMA chain rather than rounding independent batch
++  products and adding them afterwards. Rank-1 vector products remain unsupported
++  by Tiles. Launches exceeding the existing CUDA grid-Y limit are rejected.
 +
 +Each failure was reproduced manually before adding plan assertions. Run:
 +
@@ -351,11 +665,16 @@ new file mode 100644
 +The plan checks scalar gradients with runtime/macro construction on NVM/FVM/JIT,
 +embedded-NUL file round trips, and GPU-independent CUDA source generation for
 +mean/layout gradients with changing shapes. The layout case uses a non-self-inverse
-+permutation and negative axes. To execute these on CUDA hardware:
++permutation and negative axes. Batch products additionally cover changed batch
++sizes, rank-3/4 inputs, broadcasting, shared projections and non-tile-aligned
++dimensions. CUDA execution checks an independent integer-valued product, empty
++cases, CPU/GPU forward and gradient agreement and directional finite differences.
++To execute these on CUDA hardware:
 +
 +```powershell
 +camel --arg run_gpu=true test/cases/modules/tiles/mean_grad.cml std::macro std::fvm
 +camel --arg run_gpu=true test/cases/modules/tiles/layout_grad.cml std::macro std::fvm
++camel --arg run_gpu=true test/cases/modules/tiles/batch_matmul.cml std::macro std::fvm
 +```
 +
 +The experiment's own tests additionally compare its GPU gradients and Camel Adam

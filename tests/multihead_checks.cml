@@ -1,0 +1,49 @@
+module multihead_checks
+import { Attention, multihead_attention, scaled_attention, rms_norm } from attention
+import { Tensor, randn, seed, reshape, sum, mean, abs, set_num_threads } from tensor
+import { value_and_grad } from autodiff
+import { run } from tiles
+
+func init(): Attention {
+    return { q: randn([8, 8], 0.0, 0.2), k: randn([8, 8], 0.0, 0.2), v: randn([8, 8], 0.0, 0.2), o: randn([8, 8], 0.0, 0.2) }
+}
+with <m: Attention>
+func loss(x: Tensor<f32>, context: Tensor<f32>, target: Tensor<f32>): float {
+    let y = multihead_attention<m, [-1, 3, 2, 4], [-1, 5, 2, 4], [-1, 3, 8], 0.5>(rms_norm(x, 8.0), context)
+    let e = y - target
+    return mean(e * e)
+}
+func derivative(m: Attention, x: Tensor<f32>, context: Tensor<f32>, target: Tensor<f32>): (float, Attention) {
+    return value_and_grad(loss)<m>(x, context, target)
+}
+func check(batch: int): int sync {
+    let m = init()
+    let x = randn([batch, 3, 8])
+    let context = randn([batch, 5, 8])
+    let target = randn([batch, 3, 8])
+    let cpu = derivative(m, x, context, target)
+    let gpu = run<derivative>((m, x, context, target))
+    let delta = sum(abs(cpu.1.q - gpu.1.q)) + sum(abs(cpu.1.k - gpu.1.k)) + sum(abs(cpu.1.v - gpu.1.v)) + sum(abs(cpu.1.o - gpu.1.o))
+    let plus = { q: m.q + 0.001, k: m.k, v: m.v, o: m.o }
+    let minus = { q: m.q - 0.001, k: m.k, v: m.v, o: m.o }
+    let fd = (loss<plus>(x, context, target) - loss<minus>(x, context, target)) / 0.002
+    let fd_error = sum(abs(reshape([fd - sum(gpu.1.q)], [1])))
+    println('MULTIHEAD batch={} gradient_l1={} directional_error={}'->format<batch, delta, fd_error>)
+    if delta > 0.0001 || fd_error > 0.001 then sync { exit(1) }
+    return 0
+}
+func main(): int sync {
+    set_num_threads(1)
+    seed(179)
+    check(2)
+    check(3)
+    let zero_q = randn([2, 2, 3, 4]) * 0.0
+    let zero_k = randn([2, 2, 5, 4]) * 0.0
+    let values = reshape(range(0, 80)->map<(i: int): float => if i < 40 then 1.0 else 7.0>, [2, 2, 5, 4])
+    let expected = reshape(range(0, 48)->map<(i: int): float => if i < 24 then 1.0 else 7.0>, [2, 2, 3, 4])
+    let isolated = sum(abs(run<scaled_attention>((zero_q, zero_k, values, 0.5)) - expected))
+    println('MULTIHEAD batch_isolation_error={}'->format<isolated>)
+    if isolated > 0.00001 then sync { exit(1) }
+    println('MULTIHEAD CHECKS PASS')
+    return 0
+}

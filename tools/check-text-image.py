@@ -23,6 +23,8 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     (out / "fixture.json").write_text(json.dumps(row, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     checks = [
+        ("batch_matmul_checks", {"run_gpu": "true"}),
+        ("multihead_checks", {}),
         ("attention_checks", {}),
         ("text_data_checks", {"image": image, "caption": caption}),
         ("text_image_checks", {"image": image, "caption": caption, "out": out}),
@@ -30,7 +32,7 @@ def main():
     for name, arguments in checks:
         run_native("tests/" + name + ".cml", arguments, out / (name + ".log"), args.gpu, timeout=180)
     (out / "status.json").write_text(json.dumps({"checks": "passed", "trained_steps": 10,
-        "training_fixture": row["sha256"], "production_ready": False}) + "\n", encoding="utf-8")
+        "training_fixture": row["sha256"], "integration_batch": 2, "production_ready": False}) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

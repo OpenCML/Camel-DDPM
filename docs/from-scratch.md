@@ -13,7 +13,7 @@ Use a jointly trained byte-level text Transformer and a conditional diffusion Tr
 
 The scalable target is latent diffusion, with an autoencoder trained first on the selected image corpus. Train its encoder, decoder and any discriminator from random initialization. Pretrained VGG/LPIPS perceptual losses would violate this project's training constraint. A direct pixel model can validate conditional denoising before that autoencoder is ready; it does not require an image encoder at all.
 
-The checked-in `text_image.cml` is such an integration fixture: RGB64, 8×8 pixel patches, width 64, one sequence, shared projections, bidirectional text mixing, image self-attention and text cross-attention. All seven parameter leaves are new random tensors and receive gradients. It is not a full DiT implementation and has neither sufficient capacity nor the training evidence to claim general generation.
+The checked-in `text_image.cml` is such an integration fixture: RGB64, 8×8 pixel patches, width 64, four heads, independent batch elements, shared projections, bidirectional text mixing, image self-attention and text cross-attention. All seven parameter leaves are new random tensors and receive gradients. It is not a full DiT implementation and has neither sufficient capacity nor the training evidence to claim general generation.
 
 Reference architecture research: [Diffusion Transformers](https://arxiv.org/abs/2212.09748). That paper uses latent patches and reports class-conditional ImageNet results; it does not by itself validate our text-conditioned architecture, corpus or training budget.
 
@@ -43,20 +43,20 @@ python3 tools/text-image.py sample --run runs/rgb-example --out runs/rgb-sample 
 
 The downloader resumes by verifying existing images, RGB views and captions. Each fetch has size and time bounds, errors are recorded, and the summary reports whether the requested limit was reached. A single preparation process must own a dataset directory; concurrent writers are unsupported.
 
-The RGB trainer uses one image per update with random diffusion times/noise, joint text embedding updates, 10% caption dropout, native Camel Adam and EMA. Every checkpoint contains all four tensor trees. The host launcher validates shape, size, dtype, finiteness and SHA-256, flushes files, then publishes the directory and latest pointer atomically. A process lock prevents concurrent writers. Per-step reseeding reconstructs random draws from the recorded seed and global step, rather than relying on an unrecorded generator state. Source/runtime fingerprints, dataset order/hash and hyperparameters must match on resume. Only previously published complete checkpoints are eligible; partial directories are ignored.
+The RGB trainer defaults to two independently selected images per update (`--batch` is configurable), with independent Gaussian noise, a shared random diffusion time for the batch, joint text embedding updates, 10% per-item caption dropout, native Camel Adam and EMA. Every checkpoint contains all four tensor trees. The host launcher validates shape, size, dtype, finiteness and SHA-256, flushes files, then publishes the directory and latest pointer atomically. A process lock prevents concurrent writers. Per-step reseeding reconstructs random draws from the recorded seed and global step, rather than relying on an unrecorded generator state. Source/runtime fingerprints, dataset order/hash and hyperparameters, including batch size, must match on resume. Only previously published complete checkpoints are eligible; partial directories are ignored.
 
 This Linux fixture restarts Camel between checkpoint segments. That makes process recovery easy to test but adds compilation/launch overhead and is not the final large-scale training scheduler. Mid-segment interruption loses updates after the last published checkpoint. The filesystem must support the POSIX rename/fsync semantics used by the launcher; power-loss behavior on every server filesystem has not been tested.
 
-See [measured RGB validation results](results/server-rgb-validation.md). The 20-step sample is nearly uniform gray, so there is currently **no useful text-to-image quality claim**.
+The batched model is versioned `rgb64-joint-v2`. Source/runtime identity checks deliberately reject continuation of old `v1` runs; reproduce those with their original source/runtime. See [batched validation results](results/server-batched-validation.md) and the [historical single-head results](results/server-rgb-validation.md). These are pipeline checks with **no useful text-to-image quality claim**.
 
 ## Required capability gates
 
 | Gate | Acceptance evidence | Current state |
 |---|---|---|
-| Native attention | Stable large finite logits, CPU/GPU gradients, independent directional finite differences | Single-head cross-attention and RMSNorm pass |
+| Native attention | Stable large finite logits, CPU/GPU gradients, independent directional finite differences | Batched multi-head self/cross-attention and RMSNorm pass; batch isolation error zero |
 | Native RGB/text integration | Real image decode, UTF-8 byte ids, GPU forward/backward, joint text gradients, weight reload | Passes on real RGB data |
 | Dataset readiness | Diverse train/held-out corpus, language counts, caption inspection, license/provenance ledger, grouped duplicates, immutable shard hashes | Bounded museum pilot only |
-| Scalable kernels | Batched multi-head attention, embedding gather/scatter VJP, efficient matmul, documented precision contracts | Missing; current Tiles matmul requires rank 2 |
+| Scalable kernels | Batched multi-head attention, embedding gather/scatter VJP, efficient matmul, documented precision contracts | Rank ≥2 batched matmul/pullbacks and multi-head attention implemented; gather/scatter and high-throughput kernels still missing |
 | Memory and throughput | Mixed precision with explicit numeric permissions, activation recomputation, accumulation, measured peak memory/step time | Missing; no scaling claim |
 | Recoverable training | Atomic versioned model/Adam/EMA/step/RNG/data-cursor checkpoint; interrupted vs uninterrupted trajectory comparison | RGB fixture passes process restart and mid-segment interruption; MNIST entry point remains model-only |
 | Full learned stack | Random-initialized autoencoder/text encoder/denoiser trained and validated at target resolution | Not trained |

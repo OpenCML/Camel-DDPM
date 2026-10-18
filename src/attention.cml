@@ -1,18 +1,18 @@
 module attention
 
-import { Tensor, exp, max, sum, transpose, sqrt } from tensor
+import { Tensor, exp, max, sum, transpose, sqrt, reshape, permute } from tensor
 import { vjp } from autodiff
 
 // Finite-logit row softmax. The VJP avoids differentiating the stabilizing max;
 // its derivative cancels analytically. Keep the complete rule visible to Tiles.
 func probabilities(x: Tensor<f32>): Tensor<f32> {
-    let e = exp(x - max(x, 1, true))
-    return e / sum(e, 1, true)
+    let e = exp(x - max(x, -1, true))
+    return e / sum(e, -1, true)
 }
 
 func softmax_rule(x: Tensor<f32>, dy: Tensor<f32>): Tensor<f32> {
     let p = probabilities(x)
-    return p * (dy - sum(dy * p, 1, true))
+    return p * (dy - sum(dy * p, -1, true))
 }
 
 @vjp<softmax_rule>
@@ -22,14 +22,31 @@ export func row_softmax(x: Tensor<f32>): Tensor<f32> {
 
 export type Attention = { q: Tensor<f32>, k: Tensor<f32>, v: Tensor<f32>, o: Tensor<f32> }
 
-// One sequence, one head. This establishes correctness, not a production kernel.
-// Batched multi-head attention must be implemented before scaling training.
+// Rank-2 convenience entry point; use multihead_attention for batch/head axes.
 with <m: Attention>
 export func cross_attention(x: Tensor<f32>, context: Tensor<f32>, scale: float): Tensor<f32> {
     let q = x @ m.q
     let k = context @ m.k
     let v = context @ m.v
     return (row_softmax((q @ transpose(k)) * scale) @ v) @ m.o
+}
+
+// Q/K/V are [batch, heads, sequence, head_width], with independent batch/head
+// matrices. Different query/context lengths are supported by ordinary matmul.
+export func scaled_attention(q: Tensor<f32>, k: Tensor<f32>, v: Tensor<f32>, scale: float): Tensor<f32> {
+    return row_softmax((q @ transpose(k)) * scale) @ v
+}
+
+// Layout attributes are explicit so graph extraction needs no host shape
+// arithmetic. query/context layouts are [batch, length, heads, head_width];
+// output layout is [batch, query_length, width]. Use -1 for the batch extent.
+with <m: Attention, query_layout: int[], context_layout: int[], output_layout: int[], scale: float>
+export func multihead_attention(x: Tensor<f32>, context: Tensor<f32>): Tensor<f32> {
+    let q = permute(reshape(x @ m.q, query_layout), [0, 2, 1, 3])
+    let k = permute(reshape(context @ m.k, context_layout), [0, 2, 1, 3])
+    let v = permute(reshape(context @ m.v, context_layout), [0, 2, 1, 3])
+    let heads = scaled_attention(q, k, v, scale)
+    return reshape(permute(heads, [0, 2, 1, 3]), output_layout) @ m.o
 }
 
 // A graph-visible RMS normalization; width is the last feature dimension.

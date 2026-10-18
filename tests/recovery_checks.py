@@ -24,6 +24,7 @@ def interrupted_restart(trainer, resumed, expected, temporary):
     command = ["python3", str(trainer.PROJECT / "tools/text-image.py"), "train",
         "--out", str(run), "--dataset", config["dataset"], "--resume",
         "--seed", str(config["seed"]), "--rate", str(config["rate"]),
+        "--batch", str(config["batch"]),
         "--timesteps", str(config["timesteps"])]
     process = subprocess.Popen(command + ["--steps", "100", "--checkpoint-every", "90"],
         cwd=trainer.PROJECT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

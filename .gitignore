@@ -3,4 +3,5 @@ runs/
 __pycache__/
 .venv/
 .camel/
+.camel-*/
 runtime-build/

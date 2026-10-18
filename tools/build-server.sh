@@ -2,6 +2,11 @@
 set -euo pipefail
 PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 SOURCE_ROOT=${CAMEL_SOURCE_ROOT:-"$PROJECT_ROOT/runtime-build/Camel"}
+INSTALL_ROOT=${CAMEL_INSTALL_ROOT:-"$PROJECT_ROOT/.camel"}
+if [[ -e "$INSTALL_ROOT" ]]; then
+    echo 'Refusing to replace an existing runtime; choose a fresh CAMEL_INSTALL_ROOT.' >&2
+    exit 1
+fi
 : "${CAMEL_TOOLCHAIN_ROOT:?Set CAMEL_TOOLCHAIN_ROOT to the Clang conda environment}"
 : "${CAMEL_BUILD_TOOLS:?Set CAMEL_BUILD_TOOLS to the bin directory containing cmake, ninja and conan}"
 export CONDA_PREFIX="$CAMEL_TOOLCHAIN_ROOT"
@@ -19,12 +24,8 @@ cd "$SOURCE_ROOT"
 printf '{"CAMEL_ENABLE_PYTHON":"OFF"}\n' > .camel-opts.json
 conan install . --output-folder=build --build=missing --profile=clang23
 npm run build
-if [[ -e "$PROJECT_ROOT/.camel" ]]; then
-    echo 'Refusing to replace an existing project runtime; choose a fresh installation directory.' >&2
-    exit 1
-fi
-cp -a out/latest "$PROJECT_ROOT/.camel"
-cp -L "$CONDA_PREFIX/lib/libstdc++.so.6" "$PROJECT_ROOT/.camel/libs/libstdc++.so.6"
-cp -L "$CONDA_PREFIX/lib/libgcc_s.so.1" "$PROJECT_ROOT/.camel/libs/libgcc_s.so.1"
-"$PROJECT_ROOT/.camel/bin/camel" --version
-sha256sum "$PROJECT_ROOT/.camel/bin/camel" > "$PROJECT_ROOT/.camel/installation.sha256"
+cp -a out/latest "$INSTALL_ROOT"
+cp -L "$CONDA_PREFIX/lib/libstdc++.so.6" "$INSTALL_ROOT/libs/libstdc++.so.6"
+cp -L "$CONDA_PREFIX/lib/libgcc_s.so.1" "$INSTALL_ROOT/libs/libgcc_s.so.1"
+"$INSTALL_ROOT/bin/camel" --version
+sha256sum "$INSTALL_ROOT/bin/camel" > "$INSTALL_ROOT/installation.sha256"
