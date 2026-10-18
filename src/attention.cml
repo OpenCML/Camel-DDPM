@@ -1,0 +1,38 @@
+module attention
+
+import { Tensor, exp, max, sum, transpose, sqrt } from tensor
+import { vjp } from autodiff
+
+// Finite-logit row softmax. The VJP avoids differentiating the stabilizing max;
+// its derivative cancels analytically. Keep the complete rule visible to Tiles.
+func probabilities(x: Tensor<f32>): Tensor<f32> {
+    let e = exp(x - max(x, 1, true))
+    return e / sum(e, 1, true)
+}
+
+func softmax_rule(x: Tensor<f32>, dy: Tensor<f32>): Tensor<f32> {
+    let p = probabilities(x)
+    return p * (dy - sum(dy * p, 1, true))
+}
+
+@vjp<softmax_rule>
+export func row_softmax(x: Tensor<f32>): Tensor<f32> {
+    return probabilities(x)
+}
+
+export type Attention = { q: Tensor<f32>, k: Tensor<f32>, v: Tensor<f32>, o: Tensor<f32> }
+
+// One sequence, one head. This establishes correctness, not a production kernel.
+// Batched multi-head attention must be implemented before scaling training.
+with <m: Attention>
+export func cross_attention(x: Tensor<f32>, context: Tensor<f32>, scale: float): Tensor<f32> {
+    let q = x @ m.q
+    let k = context @ m.k
+    let v = context @ m.v
+    return (row_softmax((q @ transpose(k)) * scale) @ v) @ m.o
+}
+
+// A graph-visible RMS normalization; width is the last feature dimension.
+export func rms_norm(x: Tensor<f32>, width: float): Tensor<f32> {
+    return x / sqrt(sum(x * x, -1, true) / width + 0.000001)
+}

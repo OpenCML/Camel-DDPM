@@ -1,0 +1,32 @@
+module text_data
+import { Tensor, reshape, permute } from tensor
+import { bytes } from str
+import { read_chunk, file_size } from fs
+import { min } from math
+
+// UTF-8 byte vocabulary: 0..255 bytes, PAD=256, BOS=257, EOS=258.
+// No imported tokenizer or text weights. Truncation is defined in bytes.
+export func tokenize(caption: string): int[] {
+    let encoded = bytes(caption)
+    let count = min(len(encoded), 62)
+    return range(0, 64)->map<(i: int): int => {
+        return if i == 0 then 257 else if i <= count then encoded[i - 1]
+            else if i == count + 1 then 258 else 256
+    }>
+}
+
+// This dense representation is a correctness fixture. Production requires a
+// GPU embedding gather and its scatter-add VJP, rather than a dense one-hot.
+export func text_features(caption: string): Tensor<f32> {
+    let ids = tokenize(caption)
+    let values = range(0, 64 * 259)->map<(i: int): float => {
+        return if ids[i / 259] == i % 259 then 1.0 else 0.0
+    }>
+    return reshape(values, [64, 259])
+}
+
+export func rgb64(path: string): Tensor<f32> sync {
+    if file_size(path) != 64 * 64 * 3 then sync { println('Invalid RGB64 byte count'); exit(1) }
+    let pixels = bytes(read_chunk(path, 0, 64 * 64 * 3))
+    return permute(reshape(pixels, [64, 64, 3]) / 127.5 - 1.0, [2, 0, 1])
+}

@@ -1,0 +1,56 @@
+module text_image_checks
+import { Model, embedding, load_model } from ddpm
+import { init_text_image, patches, pixels, differentiate_rgb, forward_rgb } from text_image
+import { DeviceModel, upload_model, download_model, zero_model, update } from gpu
+import { text_features, rgb64 } from text_data
+import { Tensor, seed, randn, sum, abs, set_num_threads } from tensor
+import { read_text } from fs
+import { save_params } from nn
+import { run, run_device, download } from tiles
+
+func error(a: Model, b: Model): float {
+    return sum(abs(a.w1 - b.w1)) + sum(abs(a.wt - b.wt)) + sum(abs(a.b1 - b.b1)) + sum(abs(a.w2 - b.w2)) + sum(abs(a.b2 - b.b2)) + sum(abs(a.w3 - b.w3)) + sum(abs(a.b3 - b.b3))
+}
+
+func time49(): Tensor<f32> { return embedding(49) as Tensor<f32> }
+
+func roundtrip(x: Tensor<f32>): Tensor<f32> { return pixels(patches(x)) }
+
+func steps(m: DeviceModel, mu: DeviceModel, nu: DeviceModel, x: Tensor<f32>, text: Tensor<f32>, target: Tensor<f32>, i: int): DeviceModel sync {
+    return if i == 10 then m else sync {
+        let vg = run_device<differentiate_rgb>((m, x, text, time49(), target))
+        let next = run_device<update>((m, vg.1, mu, nu, 0.001, 1.0 - 0.9 ^ float(i + 1), 1.0 - 0.999 ^ float(i + 1)))
+        println('RGB TRAIN step={} loss={}'->format<i + 1, download(vg.0)>)
+        return steps(next.0, next.1, next.2, x, text, target, i + 1)
+    }
+}
+
+func main(image: string, caption: string, out: string): int sync {
+    set_num_threads(1)
+    seed(101)
+    let target = rgb64(image)
+    let text = text_features(read_text(caption))
+    let x = target * 0.7 + randn([3, 64, 64]) * 0.7
+    let m = init_text_image()
+    let cpu = differentiate_rgb(m, x, text, time49(), target)
+    let gpu = run<differentiate_rgb>((m, x, text, time49(), target))
+    let gradient_error = error(cpu.1, gpu.1)
+    let text_gradient = sum(abs(gpu.1.wt))
+    let layout_error = sum(abs(run<roundtrip>(target) - target))
+    let resident = upload_model(m)
+    let zero = upload_model(zero_model(m))
+    let trained = steps(resident, zero, zero, x, text, target, 0)
+    let after = run_device<differentiate_rgb>((trained, x, text, time49(), target))
+    save_params(download_model(trained), out + '/model')
+    let loaded = upload_model(load_model(out + '/model'))
+    let a = run<forward_rgb>((trained, x, text, time49()))
+    let b = run<forward_rgb>((loaded, x, text, time49()))
+    let c = run<forward_rgb>((loaded, x, text_features('A red bird on a branch'), time49()))
+    let reload_error = sum(abs(a - b))
+    let prompt_change = sum(abs(b - c))
+    println('RGB CHECK gradient_l1={} text_gradient_l1={} layout_error={} before={} after={} reload_error={} prompt_change={}'->format<gradient_error, text_gradient, layout_error, cpu.0, download(after.0), reload_error, prompt_change>)
+    let ok = gradient_error < 0.001 && text_gradient > 0.000001 && layout_error == 0.0 && download(after.0) < cpu.0 && reload_error == 0.0 && prompt_change > 0.000001
+    println(if ok then 'RGB TEXT IMAGE CHECKS PASS' else 'RGB TEXT IMAGE CHECKS FAIL')
+    if !ok then sync { exit(1) }
+    return 0
+}

@@ -1,0 +1,59 @@
+module text_image
+import { Model } from ddpm
+import { row_softmax, rms_norm } from attention
+import { Tensor, reshape, permute, transpose, exp, mean, randn } from tensor
+import { value_and_grad } from autodiff
+
+// RGB64 integration model, trained from random weights. Seven leaves reuse the
+// verified resident Camel Adam, not the MNIST network. This deliberately small
+// single-head network is a backend fixture, not a production text-image model.
+export func init_text_image(): Model {
+    return { w1: randn([192, 64], 0.0, 0.05), wt: randn([259, 64], 0.0, 0.02),
+        b1: randn([64, 64], 0.0, 0.02), w2: randn([64, 64], 0.0, 0.05),
+        b2: randn([64, 64], 0.0, 0.02), w3: randn([64, 192], 0.0, 0.01),
+        b3: randn([16, 64], 0.0, 0.02) }
+}
+
+export func patches(x: Tensor<f32>): Tensor<f32> {
+    return reshape(permute(reshape(x, [3, 8, 8, 8, 8]), [1, 3, 0, 2, 4]), [64, 192])
+}
+
+export func pixels(x: Tensor<f32>): Tensor<f32> {
+    return reshape(permute(reshape(x, [8, 8, 3, 8, 8]), [2, 0, 3, 1, 4]), [3, 64, 64])
+}
+
+with <m: Model>
+export func predict_rgb(noisy: Tensor<f32>, text: Tensor<f32>, time: Tensor<f32>): Tensor<f32> {
+    let tokens = text @ m.wt + m.b2
+    let encoded = tokens + row_softmax((tokens @ transpose(tokens)) * 0.125) @ tokens
+    let image = patches(noisy) @ m.w1 + m.b1 + time @ m.b3
+    let normalized = rms_norm(image, 64.0)
+    let mixed = image + row_softmax(((normalized @ m.w2) @ transpose(encoded)) * 0.125) @ encoded
+    let spatial = mixed + row_softmax((mixed @ transpose(mixed)) * 0.125) @ mixed
+    let h = spatial / (1.0 + exp(-spatial))
+    return pixels(h @ m.w3)
+}
+
+with <m: Model>
+func loss(noisy: Tensor<f32>, text: Tensor<f32>, time: Tensor<f32>, target: Tensor<f32>): float {
+    let error = predict_rgb<m>(noisy, text, time) - target
+    return mean(error * error)
+}
+
+export func differentiate_rgb(m: Model, noisy: Tensor<f32>, text: Tensor<f32>, time: Tensor<f32>, target: Tensor<f32>): (float, Model) {
+    return value_and_grad(loss)<m>(noisy, text, time, target)
+}
+
+export func forward_rgb(m: Model, noisy: Tensor<f32>, text: Tensor<f32>, time: Tensor<f32>): Tensor<f32> {
+    return predict_rgb<m>(noisy, text, time)
+}
+
+export func average_rgb(previous: Model, current: Model): Model {
+    return { w1: previous.w1 * 0.99 + current.w1 * 0.01,
+        wt: previous.wt * 0.99 + current.wt * 0.01,
+        b1: previous.b1 * 0.99 + current.b1 * 0.01,
+        w2: previous.w2 * 0.99 + current.w2 * 0.01,
+        b2: previous.b2 * 0.99 + current.b2 * 0.01,
+        w3: previous.w3 * 0.99 + current.w3 * 0.01,
+        b3: previous.b3 * 0.99 + current.b3 * 0.01 }
+}

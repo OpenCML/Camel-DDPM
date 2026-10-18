@@ -1,0 +1,18 @@
+module text_data_checks
+import { tokenize, text_features, rgb64 } from text_data
+import { shape, sum, abs, set_num_threads } from tensor
+import { read_text } from fs
+
+func main(image: string, caption: string): int sync {
+    set_num_threads(1)
+    let ids = tokenize('A中')
+    let empty = tokenize('')
+    let text = text_features(read_text(caption))
+    let pixels = rgb64(image)
+    let s = shape(pixels)
+    let valid = ids[0] == 257 && ids[1] == 65 && ids[2] == 228 && ids[3] == 184 && ids[4] == 173 && ids[5] == 258 && ids[6] == 256 && empty[1] == 258 && sum(text) == 64.0 && s[0] == 3 && s[1] == 64 && s[2] == 64
+    println('DATA rgb_shape={} byte_tokens={} text_onehot_sum={} pixel_abs_sum={}'->format<s, ids, sum(text), sum(abs(pixels))>)
+    println(if valid then 'TEXT DATA CHECKS PASS' else 'TEXT DATA CHECKS FAIL')
+    if !valid then sync { exit(1) }
+    return 0
+}

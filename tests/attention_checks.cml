@@ -1,0 +1,44 @@
+module attention_checks
+import { Attention, row_softmax, cross_attention, rms_norm } from attention
+import { Tensor, randn, reshape, seed, sum, abs, set_num_threads } from tensor
+import { value_and_grad } from autodiff
+import { run } from tiles
+
+with <m: Attention>
+func loss(x: Tensor<f32>, context: Tensor<f32>, target: Tensor<f32>): float {
+    let error = cross_attention<m>(rms_norm(x, 4.0), context, 0.5) - target
+    return sum(error * error)
+}
+
+func derivative(m: Attention, x: Tensor<f32>, context: Tensor<f32>, target: Tensor<f32>): (float, Attention) {
+    return value_and_grad(loss)<m>(x, context, target)
+}
+
+func init(): Attention {
+    return { q: randn([4, 4], 0.0, 0.2), k: randn([4, 4], 0.0, 0.2), v: randn([4, 4], 0.0, 0.2), o: randn([4, 4], 0.0, 0.2) }
+}
+
+func main(): int sync {
+    set_num_threads(1)
+    seed(127)
+    let m = init()
+    let x = randn([3, 4])
+    let context = randn([5, 4])
+    let target = randn([3, 4])
+    let cpu = derivative(m, x, context, target)
+    let gpu = run<derivative>((m, x, context, target))
+    let gradient_error = sum(abs(cpu.1.q - gpu.1.q)) + sum(abs(cpu.1.k - gpu.1.k)) + sum(abs(cpu.1.v - gpu.1.v)) + sum(abs(cpu.1.o - gpu.1.o))
+    let plus = { q: m.q + 0.001, k: m.k, v: m.v, o: m.o }
+    let minus = { q: m.q - 0.001, k: m.k, v: m.v, o: m.o }
+    let fd = (loss<plus>(x, context, target) - loss<minus>(x, context, target)) / 0.002
+    let fd_error = sum(abs(reshape([fd - sum(cpu.1.q)], [1])))
+    let logits = reshape([1000.0, 1000.0, -1000.0, -1000.0, -1000.0, -1000.0], [2, 3])
+    let p = run<row_softmax>(logits)
+    let expected = reshape([0.5, 0.5, 0.0, 0.333333333333, 0.333333333333, 0.333333333333], [2, 3])
+    let stable_error = sum(abs(p - expected))
+    println('ATTENTION gradient_l1={} directional_error={} stable_error={}'->format<gradient_error, fd_error, stable_error>)
+    let ok = gradient_error < 0.0001 && fd_error < 0.001 && stable_error < 0.000001
+    println(if ok then 'ATTENTION CHECKS PASS' else 'ATTENTION CHECKS FAIL')
+    if !ok then sync { exit(1) }
+    return 0
+}
