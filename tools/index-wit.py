@@ -13,6 +13,7 @@ from pathlib import Path
 import sqlite3
 from urllib.parse import urlsplit
 from text_image_runtime import digest
+from checkpoint_store import atomic_json
 
 
 def main():
@@ -24,6 +25,11 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     csv.field_size_limit(4 * 1024 * 1024)
     db = sqlite3.connect(out / "candidates.sqlite")
+    # This database is a rebuildable index of the checksummed source. WAL avoids
+    # repeatedly syncing large rollback journals during random-key insertion.
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=NORMAL")
+    db.execute("PRAGMA cache_size=-65536")
     db.execute("CREATE TABLE pairs (identity TEXT PRIMARY KEY, image_id TEXT, language TEXT, record TEXT)")
     db.execute("CREATE INDEX images ON pairs(image_id)")
     seen, selected = 0, 0
@@ -37,6 +43,8 @@ def main():
                 raise ValueError("unrecognized WIT metadata columns")
             for row in reader:
                 seen += 1
+                if seen % 100000 == 0:
+                    print(f"PROGRESS scanned={seen} selected_before_dedup={selected}", flush=True)
                 language = row["language"]
                 if language not in ("en", "zh"):
                     continue
@@ -80,6 +88,7 @@ def main():
                     text.write(record + "\n")
     languages = dict(db.execute("SELECT language, COUNT(*) FROM pairs GROUP BY language"))
     images = db.execute("SELECT COUNT(DISTINCT image_id) FROM pairs").fetchone()[0]
+    db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     db.close()
     summary = {"schema": 1, "status": "candidate_metadata_only", "scanned_rows": seen,
         "candidate_pairs_by_language": languages, "candidate_unique_image_urls": images,
@@ -87,7 +96,7 @@ def main():
         "sources": sources, "candidates_sha256": digest(destination),
         "required_next_gates": ["individual image license and attribution", "image download and decode",
             "caption quality and diversity", "exact/perceptual duplicate grouping", "immutable train/evaluation shards"]}
-    (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_json(out / "summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False), flush=True)
 
 

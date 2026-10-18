@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "status": "pixel_and_provenance_audit_only",
+  "transported_images": 128,
+  "decoded_images": 128,
+  "license_declaration_verified": 117,
+  "license_review_required": 11,
+  "caption_pairs_by_language": {
+    "zh": 63,
+    "en": 65
+  },
+  "licenses": {
+    "CC BY 2.0": 14,
+    "CC BY-SA 2.0": 8,
+    "CC BY-SA 3.0": 29,
+    "Public domain": 44,
+    "CC BY 2.5": 3,
+    "CC BY 3.0": 5,
+    "CC BY-SA 4.0": 19,
+    "CC BY 4.0": 2,
+    "CC0": 1,
+    "CC BY-SA 2.5": 1,
+    "CC BY-SA 3.0 nl": 1,
+    "FAL": 1
+  },
+  "training_admitted_images": 0,
+  "manifest_sha256": "fdada96ffaec3ecd33c793a3c40a984dd34aacd4d03274ad2b191361d3f26475",
+  "remaining_gates": [
+    "caption quality and coverage",
+    "cross-source duplicate grouping",
+    "immutable training/evaluation shards"
+  ]
+}
