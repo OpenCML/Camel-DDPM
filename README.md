@@ -2,9 +2,11 @@
 
 用 Camel 实现 28×28 MNIST DDPM，验证数据读取、训练、自动微分、GPU 更新、权重保存与反向采样的完整流程。
 
-**当前状态：流程已跑通，生成质量尚未达标。** 小型 MLP 已学到部分笔画，但样本仍有大量噪点。这个仓库首先是 Camel 能力与缺口的可复现实验。
+**当前状态：已在远程 RTX 3090 上跑通训练和采样，背景噪点明显减少，但仍有断笔和块状接缝。** 这个仓库首先是 Camel 能力与缺口的可复现实验。
 
-![GPU baseline after 5,000 updates](docs/results/gpu-baseline.png)
+![Remote patch-x0 model after 5,000 updates](docs/results/server-patch-5000.png)
+
+最新实验：[服务器验证记录](docs/results/server-patch-validation.md)。旧 MLP 基线见下方验证结果。
 
 ## 实现范围
 
@@ -32,6 +34,18 @@ CPU 仍负责 IDX 读取、随机噪声、时间/调度系数、少量加噪与�
 脚本将完整分发安装到本项目 `.camel/`，记录版本与二进制 SHA-256。之后所有运行默认使用 `.camel/bin/camel.exe`，不链接开发目录。运行时、MNIST 和训练产物均不进入 Git。显式更新时加 `-Update`；更新前应结束正在运行的 Camel 进程。
 
 ## 运行
+
+### 在服务器上运行（当前训练位置）
+
+后续训练已迁移至 `ssh 88zjwei` 的 `/home/zjwei/projects/Camel-DDPM`，使用该目录自己的 Linux `.camel/` 安装；本机不运行训练。
+部署、GPU 选择与日志检查见 [远程训练说明](docs/remote-training.md)。
+`run.sh` 提供 Linux GPU 启动入口；`run.ps1` 仍保留用于显式选择在 Windows 上运行。
+
+新增的 `patch-x0` 实验按 4×4 图像块共享权重、进行全局位置混合，预测干净像素，固定隐藏宽度 64。
+其 x0-MSE 与旧基线的 epsilon-MSE 是不同目标，数值不能直接对比。
+旧模型和 checkpoint 保持 `epsilon` 配置，采样时按原配置选择网络与后验参数化。
+
+### Windows 本地入口
 
 ```powershell
 # 下载并校验原始 MNIST，然后用宿主 gzip 解压；IDX 解码在 Camel 中完成。
@@ -84,7 +98,7 @@ python tools\preview.py runs\gpu-baseline
 
 ## 发现的缺口与下一步
 
-已补齐：标量 `math.sqrt` 反向规则、含 NUL 的二进制文件写入、Tiles 对均值反向图 `numel` 的形状特化。实验没有改变 Camel 的语言语义。
+已补齐：标量 `math.sqrt` 反向规则、含 NUL 的二进制文件写入、Tiles 对 `numel`/`shape` 的形状特化，以及逆轴置换的 GPU 降低。实验没有改变 Camel 的语言语义。
 
 当前瓶颈是小型全连接网络的生成质量；下一步应验证卷积去噪器或小型 U-Net。
 Tiles 当前公开支持子集还不含完整卷积/池化前后向，不能直接将 CPU CNN 示例当作可用 GPU U-Net。

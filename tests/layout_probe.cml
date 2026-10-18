@@ -1,0 +1,20 @@
+module layout_probe
+import { Tensor, reshape, permute, sum, abs } from tensor
+import { grad } from autodiff
+import { source, run } from tiles
+func layout_loss(x: Tensor<f32>): float {
+    let y = reshape(permute(reshape(x, [-1, 2, 3]), [2, 0, 1]), [-1, 6])
+    return sum(y * y)
+}
+func main(): int sync {
+    let derivative = grad(layout_loss)
+    let x = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [1, 6])
+    println(len(source<derivative>(x)))
+    let difference = sum(abs(run<derivative>(x) - x * 2.0))
+    println('LAYOUT gradient_error={}'->format<difference>)
+    let changed = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0], [2, 6])
+    let changed_error = sum(abs(run<derivative>(changed) - changed * 2.0))
+    println('LAYOUT changed_batch_error={}'->format<changed_error>)
+    if difference > 0.000001 || changed_error > 0.000001 then sync { exit(1) }
+    return 0
+}

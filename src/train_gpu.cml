@@ -1,7 +1,8 @@
 module train_gpu
 import { Model, Schedule, init, schedule, embedding, q_sample } from ddpm
-import { DeviceModel, upload_model, download_model, differentiate, update, zero_model } from gpu
-import { Tensor, seed, randn, set_num_threads } from tensor
+import { DeviceModel, upload_model, download_model, differentiate, differentiate_clean, forward_clean, update, zero_model } from gpu
+import { init_patch } from patch_model
+import { Tensor, seed, randn, set_num_threads, slice, concat } from tensor
 import { run_device, run, download, device } from tiles
 import { image_count, batch as read_batch, save_grid } from mnist
 import { randint, seed as random_seed } from random
@@ -10,33 +11,43 @@ import { save_params } from nn
 import { get_env } from sys
 import { write_text } from fs
 
-func evaluate(m: DeviceModel, clean: Tensor, noise: Tensor, s: Schedule, i: int, total: float): float sync {
+func evaluate(m: DeviceModel, clean: Tensor, noise: Tensor, s: Schedule, i: int, total: float, model_kind: string, phase: string): float sync {
     return if i == 5 then total / 5.0 else sync {
         let t = (len(s.beta) - 1) * (2 * i + 1) / 10
-        let vg = run_device<differentiate>((m, q_sample(clean, noise, s.abar[t]), noise, embedding(t), sqrt(1.0 - s.abar[t])))
-        return evaluate(m, clean, noise, s, i + 1, total + download(vg.0))
+        let noisy = q_sample(clean, noise, s.abar[t])
+        let vg = if model_kind == 'patch-x0' then run_device<differentiate_clean>((m, noisy, clean, embedding(t), sqrt(1.0 - s.abar[t])))
+            else run_device<differentiate>((m, noisy, noise, embedding(t), sqrt(1.0 - s.abar[t])))
+        println('VALID t={} loss={} objective={}'->format<t, download(vg.0), model_kind>)
+        if model_kind == 'patch-x0' && phase == 'after' && i % 2 == 0 then sync {
+            let recon = run<forward_clean>((m, noisy, embedding(t), sqrt(1.0 - s.abar[t])))
+            let comparison = concat(concat(slice(noisy, 0, 0, 8), slice(recon, 0, 0, 8), 0), slice(clean, 0, 0, 8), 0)
+            save_grid(comparison, get_env('DDPM_OUT') + '/denoising_' + string(t) + '.pgm')
+        }
+        return evaluate(m, clean, noise, s, i + 1, total + download(vg.0), model_kind, phase)
     }
 }
 
-func train_loop(m: DeviceModel, mu: DeviceModel, nu: DeviceModel, count: int, s: Schedule, i: int, steps: int, batch: int, rate: float, report: int, delay_ms: int): DeviceModel sync {
+func train_loop(m: DeviceModel, mu: DeviceModel, nu: DeviceModel, count: int, s: Schedule, i: int, steps: int, batch: int, rate: float, report: int, delay_ms: int, model_kind: string): DeviceModel sync {
     return if i == steps then m else sync {
         let offset = randint(0, count / batch - 1) * batch
         let clean = read_batch('data/train-images-idx3-ubyte', offset, batch)
         let t = randint(0, len(s.beta) - 1)
         let noise = randn([batch, 784])
         let noisy = q_sample(clean, noise, s.abar[t])
-        let vg = run_device<differentiate>((m, noisy, noise, embedding(t), sqrt(1.0 - s.abar[t])))
+        let vg = if model_kind == 'patch-x0' then run_device<differentiate_clean>((m, noisy, clean, embedding(t), sqrt(1.0 - s.abar[t])))
+            else run_device<differentiate>((m, noisy, noise, embedding(t), sqrt(1.0 - s.abar[t])))
         let next = run_device<update>((m, vg.1, mu, nu, rate, 1.0 - 0.9 ^ float(i + 1), 1.0 - 0.999 ^ float(i + 1)))
         if i % report == 0 || i + 1 == steps then sync {
             println('TRAIN step={} loss={} t={} device=CUDA'->format<i + 1, download(vg.0), t>)
         }
         sleep(delay_ms)
-        return train_loop(next.0, next.1, next.2, count, s, i + 1, steps, batch, rate, report, delay_ms)
+        return train_loop(next.0, next.1, next.2, count, s, i + 1, steps, batch, rate, report, delay_ms, model_kind)
     }
 }
 
-func main(steps: int, batch: int, width: int, timesteps: int, report: int, threads: int, rate: float, delay_ms: int): int sync {
+func main(steps: int, batch: int, width: int, timesteps: int, report: int, threads: int, rate: float, delay_ms: int, model_kind: string): int sync {
     set_num_threads(1)
+    if model_kind != 'epsilon' && model_kind != 'patch-x0' then sync { println('Unknown model kind'); exit(1) }
     seed(20261018)
     random_seed(20261018)
     println('GPU device={}'->format<device()>)
@@ -48,16 +59,17 @@ func main(steps: int, batch: int, width: int, timesteps: int, report: int, threa
     let valid = read_batch('data/t10k-images-idx3-ubyte', 0, 128)
     save_grid(valid, get_env('DDPM_OUT') + '/validation.pgm')
     let s = schedule(timesteps)
-    let host = init(width)
+    let host = if model_kind == 'patch-x0' then init_patch() else init(width)
     let m = upload_model(host)
     let zero = upload_model(zero_model(host))
     let noise = randn([128, 784])
-    let before = evaluate(m, valid, noise, s, 0, 0.0)
+    let before = evaluate(m, valid, noise, s, 0, 0.0, model_kind, 'before')
     println('VALID before={}'->format<before>)
-    let trained = train_loop(m, zero, zero, count, s, 0, steps, batch, rate, report, delay_ms)
-    let after = evaluate(trained, valid, noise, s, 0, 0.0)
+    let trained = train_loop(m, zero, zero, count, s, 0, steps, batch, rate, report, delay_ms, model_kind)
+    let after = evaluate(trained, valid, noise, s, 0, 0.0, model_kind, 'after')
     println('VALID after={} ratio={}'->format<after, after / before>)
     save_params(download_model(trained), get_env('DDPM_OUT') + '/checkpoint')
-    write_text(get_env('DDPM_OUT') + '/metrics.json', '{"before":' + string(before) + ',"after":' + string(after) + ',"ratio":' + string(after / before) + '}\n')
+    let objective = if model_kind == 'patch-x0' then 'x0_mse' else 'epsilon_mse'
+    write_text(get_env('DDPM_OUT') + '/metrics.json', '{"model":"' + model_kind + '","objective":"' + objective + '","before":' + string(before) + ',"after":' + string(after) + ',"ratio":' + string(after / before) + '}\n')
     return 0
 }

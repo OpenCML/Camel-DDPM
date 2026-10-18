@@ -1,7 +1,7 @@
 # Required Camel library fixes
 
 The validated project-local installation was built from Camel `1555bf5b`
-(development version 0.2.14) with the three fixes in
+(development version 0.2.14) with the fixes in
 [`camel-ddpm-primitives.patch`](camel-ddpm-primitives.patch).
 That patch deliberately excludes unrelated changes in the source checkout.
 
@@ -10,7 +10,8 @@ their regression cases, test plan and technical note:
 
 - `modules/math/module.cpp`: f32/f64 scalar sqrt VJP, registered by math.
 - `modules/fs/operators.cpp`: length-aware binary output and write/close error detection.
-- `modules/tiles/src/compiler.cpp`: specialize tensor numel using concrete invocation shapes.
+- `modules/tiles/src/compiler.cpp`: specialize tensor numel/shape using concrete
+  invocation shapes; lower inverse permutations through the core layout instance.
 
 Apply and build using Camel's normal build workflow, then install the collected
 distribution into this project:
@@ -32,10 +33,10 @@ have already landed upstream, do not reapply the patch; install a distribution
 with the fixes and run the numerical tests.
 
 The patch includes regression cases and the test plan
-`test/plans/feat/modules/ddpm_primitives.plan.toml` (12 passing NVM/FVM/JIT checks).
+`test/plans/feat/modules/ddpm_primitives.plan.toml` (15 NVM/FVM/JIT checks).
 They cover scalar sqrt gradients, an
 embedded-NUL/high-byte file round trip and CUDA source specialization of the
-mean gradient with changing input shapes. The numerical square-root rule is
+mean/layout gradients with changing input shapes and negative permutation axes. The numerical square-root rule is
 tested in the differentiable positive domain.
 
 No patched binaries or source checkout are needed after installation: `.camel/`

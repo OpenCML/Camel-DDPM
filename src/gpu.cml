@@ -3,6 +3,7 @@ import { Model, loss, predict } from ddpm
 import { Tensor, sqrt } from tensor
 import { value_and_grad } from autodiff
 import { Device, upload, download } from tiles
+import { clean_loss, predict_clean } from patch_model
 
 export type DeviceModel = { w1: Device<Tensor<f32>>, wt: Device<Tensor<f32>>, b1: Device<Tensor<f32>>, w2: Device<Tensor<f32>>, b2: Device<Tensor<f32>>, w3: Device<Tensor<f32>>, b3: Device<Tensor<f32>> }
 
@@ -20,6 +21,14 @@ export func differentiate(m: Model, x: Tensor, noise: Tensor, time: Tensor, nois
 
 export func forward(m: Model, x: Tensor, time: Tensor, noise_scale: float): Tensor {
     return predict<m>(x, time, noise_scale)
+}
+
+export func differentiate_clean(m: Model, x: Tensor, clean: Tensor, time: Tensor, noise_scale: float): (float, Model) {
+    return value_and_grad(clean_loss)<m>(x, clean, time, noise_scale)
+}
+
+export func forward_clean(m: Model, x: Tensor, time: Tensor, noise_scale: float): Tensor {
+    return predict_clean<m>(x, time)
 }
 
 // Functional Adam expressed in Camel so the optimizer, too, compiles to CUDA.

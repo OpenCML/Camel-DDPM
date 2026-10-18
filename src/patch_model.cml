@@ -1,0 +1,50 @@
+module patch_model
+import { Model } from ddpm
+import { Tensor, reshape, permute, randn, zeros, eye, exp, mean, minimum, maximum } from tensor
+
+// Exact 4x4 patches: [B,28,28] -> [B,7,7,4,4] -> [B*49,16].
+export func patchify(x: Tensor): Tensor {
+    return reshape(permute(reshape(x, [-1, 7, 4, 7, 4]), [0, 1, 3, 2, 4]), [-1, 16])
+}
+
+export func unpatchify(x: Tensor): Tensor {
+    return reshape(permute(reshape(x, [-1, 7, 7, 4, 4]), [0, 1, 3, 2, 4]), [-1, 784])
+}
+
+export func init_patch(): Model sync {
+    return {
+        w1: randn([16, 64], 0.0, 0.25), wt: randn([16, 64], 0.0, 0.1), b1: zeros([64]),
+        w2: eye(49) * 0.5 + randn([49, 49], 0.0, 0.05), b2: zeros([49]),
+        w3: randn([64, 16], 0.0, 0.01), b3: zeros([16]) - 0.7
+    }
+}
+
+func silu(x: Tensor): Tensor { return x / (1.0 + exp(-x)) }
+
+// Mix the 49 spatial positions independently in each feature channel.
+with <m: Model>
+func spatial(x: Tensor): Tensor {
+    // Fixed hidden width keeps layout attributes static; batch is inferred with -1.
+    let channels = reshape(permute(reshape(x, [-1, 49, 64]), [0, 2, 1]), [-1, 49])
+    let mixed = channels @ m.w2 + m.b2
+    return reshape(permute(reshape(mixed, [-1, 64, 49]), [0, 2, 1]), [-1, 64])
+}
+
+with <m: Model>
+export func predict_clean(x: Tensor, time: Tensor): Tensor {
+    let h1 = silu(patchify(x) @ m.w1 + time @ m.wt + m.b1)
+    let h2 = silu(h1 + spatial<m>(h1))
+    let h3 = silu(h1 + spatial<m>(h2))
+    return unpatchify(h3 @ m.w3 + m.b3)
+}
+
+with <m: Model>
+export func clean_loss(noisy: Tensor, clean: Tensor, time: Tensor, noise_scale: float): float {
+    let error = predict_clean<m>(noisy, time) - clean
+    return mean(error * error)
+}
+
+// x0 parameterization of the same fixed-small DDPM posterior.
+export func posterior(x: Tensor, predicted_clean: Tensor, coef1: float, coef2: float): Tensor {
+    return coef1 * minimum(maximum(predicted_clean, -1.0), 1.0) + coef2 * x
+}

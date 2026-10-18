@@ -1,29 +1,33 @@
 module sample_gpu
 import { Schedule, schedule, embedding, reverse_mean, load_model } from ddpm
-import { DeviceModel, upload_model, forward } from gpu
+import { DeviceModel, upload_model, forward, forward_clean } from gpu
+import { posterior } from patch_model
 import { Tensor, seed, randn, save_npy, shape, set_num_threads } from tensor
 import { run, device } from tiles
 import { sqrt } from math
 import { get_env } from sys
 import { save_grid } from mnist
 
-func sample_loop(m: DeviceModel, s: Schedule, x: Tensor, t: int, out: string): Tensor sync {
+func sample_loop(m: DeviceModel, s: Schedule, x: Tensor, t: int, out: string, model_kind: string): Tensor sync {
     return if t < 0 then x else sync {
         let previous = if t == 0 then 1.0 else s.abar[t - 1]
-        let epsilon = run<forward>((m, x, embedding(t), sqrt(1.0 - s.abar[t])))
-        let mu = reverse_mean(x, epsilon, s.beta[t], s.abar[t], previous)
+        let prediction = if model_kind == 'patch-x0' then run<forward_clean>((m, x, embedding(t), sqrt(1.0 - s.abar[t])))
+            else run<forward>((m, x, embedding(t), sqrt(1.0 - s.abar[t])))
+        let mu = if model_kind == 'patch-x0' then posterior(x, prediction, s.beta[t] * sqrt(previous) / (1.0 - s.abar[t]), (1.0 - previous) * sqrt(1.0 - s.beta[t]) / (1.0 - s.abar[t]))
+            else reverse_mean(x, prediction, s.beta[t], s.abar[t], previous)
         let next = if t == 0 then mu else mu + sqrt(s.beta[t] * (1.0 - previous) / (1.0 - s.abar[t])) * randn([shape(x)[0], 784])
         if t % 10 == 0 || t == len(s.beta) - 1 then sync {
             save_npy(next, out + '/trajectory_' + string(t) + '.npy')
             save_grid(next, out + '/trajectory_' + string(t) + '.pgm')
             println('SAMPLE t={} device=CUDA'->format<t>)
         }
-        return sample_loop(m, s, next, t - 1, out)
+        return sample_loop(m, s, next, t - 1, out, model_kind)
     }
 }
 
-func main(timesteps: int, samples: int, sample_seed: int, threads: int): int sync {
+func main(timesteps: int, samples: int, sample_seed: int, threads: int, model_kind: string): int sync {
     set_num_threads(1)
+    if model_kind != 'epsilon' && model_kind != 'patch-x0' then sync { println('Unknown model kind'); exit(1) }
     println('GPU device={}'->format<device()>)
     seed(sample_seed)
     let out = get_env('DDPM_OUT')
@@ -32,7 +36,7 @@ func main(timesteps: int, samples: int, sample_seed: int, threads: int): int syn
     let initial = randn([samples, 784])
     save_npy(initial, out + '/initial_noise.npy')
     save_grid(initial, out + '/initial_noise.pgm')
-    let result = sample_loop(m, s, initial, timesteps - 1, out)
+    let result = sample_loop(m, s, initial, timesteps - 1, out, model_kind)
     save_npy(result, out + '/samples.npy')
     save_grid(result, out + '/samples.pgm')
     println('SAMPLE complete')
