@@ -1,0 +1,715 @@
+From 1b724238915d64a194bbf51b866604d79412314f Mon Sep 17 00:00:00 2001
+From: Zhenjie Wei <Kogler_S@outlook.com>
+Date: Sun, 18 Oct 2026 23:17:13 +0800
+Subject: [PATCH] feat: normalize device parameter trees and transfer nested
+ training state
+
+---
+ docs/design/training/implementation.cn.md     |  31 +++
+ include/camel/core/type/collection.h          |   4 +-
+ include/camel/core/type/other.h               |   8 +-
+ modules/tiles/CMakeLists.txt                  |   2 +-
+ modules/tiles/include/tiles/device.h          |   5 +-
+ .../include/tiles/internal/tree_transfer.h    |  18 ++
+ modules/tiles/src/device.cpp                  |  61 +++++-
+ modules/tiles/src/module.cpp                  |  54 +-----
+ modules/tiles/src/tree_transfer.cpp           | 180 ++++++++++++++++++
+ src/core/type/collection.cpp                  |  14 +-
+ src/core/type/other.cpp                       |   6 +-
+ test/cases/modules/tiles/device_tree.cml      |  33 ++++
+ .../modules/tiles/device_tree_invalid.cml     |   4 +
+ test/plans/feat/modules/tiles.plan.toml       |   9 +
+ test/plans/gpu/tiles_transfer.plan.toml       |   9 +
+ 15 files changed, 365 insertions(+), 73 deletions(-)
+ create mode 100644 docs/design/training/implementation.cn.md
+ create mode 100644 modules/tiles/include/tiles/internal/tree_transfer.h
+ create mode 100644 modules/tiles/src/tree_transfer.cpp
+ create mode 100644 test/cases/modules/tiles/device_tree.cml
+ create mode 100644 test/cases/modules/tiles/device_tree_invalid.cml
+
+diff --git a/docs/design/training/implementation.cn.md b/docs/design/training/implementation.cn.md
+new file mode 100644
+index 00000000..051f4f58
+--- /dev/null
++++ b/docs/design/training/implementation.cn.md
+@@ -0,0 +1,31 @@
++# 训练基础设施实现进度
++
++依据：[训练基础设施设计](README.cn.md)，2026-10-18。本文记录实现与实测，不替代设计稿的阶段验收。
++
++## 已实现：设备参数树
++
++- `Device<{a: A, b: (B, C)}>` 在类型构造时规范化为 `{a: Device<A>, b: (Device<B>, Device<C>)}`，不是运行时转换。泛型返回类型 `Device<P>` 在代入具体的 `P` 后同样规范化。
++- 模块类型构造接口 `OtherType::cloneWithParams` / `cloneWithArguments` 返回 `Type*`，允许结果是普通结构体或元组。已有模块仍可用协变返回类型返回 `OtherType*`。
++- `tiles::upload` / `download` 接受嵌套结构体和普通元组，保留字段顺序、元组位置与张量静态细化。当前实际传输支持 f32 张量和 `float` 叶子，包含零元素张量。
++- 不支持的 `Device<T>` 叶子在编译期报出完整路径。可空、可失败包装和可变单元不按普通元组展开。
++- 传输先将全部叶子复制为本机拥有的快照或设备存储所有权，再调用 CUDA；CUDA 调用不持有 Camel 移动堆指针。重建结果时禁止收集，保持尚未完成的嵌套对象有效。
++
++## 服务器手动验证
++
++构建与执行均在 `88zjwei`，本机不编译、不训练。使用标准 `npm run build`，安装为项目内独立运行时 `.camel-device-tree-v1` / `.camel-device-tree-v2`，保留原训练运行时。
++
++`test/cases/modules/tiles/device_tree.cml` 在物理 GPU 2 上以 `std::macro std::nvm` 执行，六项误差均为 `0.0`：整树往返、零元素张量、f64 标量、自动微分的损失、设备端梯度更新，以及原参数所有权。显式展开的类型与 `Device<Model>` 双向兼容，泛型上传返回 `Device<P>`。
++
++`device_tree_invalid.cml` 在设备选择为 `invalid` 时编译即失败，错误指出 `$.block.1.label` 的 `string` 叶子，无需初始化 GPU。按观察到的输出补充计划条目；未运行全量测试。
++
++DDPM 项目新增 `examples/device-tree-step.cml`，在真实的已封存图像批量上，从随机初始化分别执行现有 VAE 和潜变量扩散模型的前向、反向与 Adam 更新。参数及优化器返回值使用 `Device<Parameters>`、`Device<(AE, AE, AE)>`、`Device<(LD, LD, LD)>`；潜变量直接保留在设备上加噪，无需先下载。新接口直接下载嵌套优化器树，写出 390 个 `.npy` 叶子。
++
++首次运行记录：VAE loss `0.3690241159925844`，扩散噪声 MSE `1.025955108172196`；参数平方变化量分别为 `0.00011043555311198371`、`0.00018747812900134675`。这是接口与更新流程的实测，不代表图像生成质量或生产规模训练完成。
++
++在最终 v2 运行时独立重跑相同输入，390 个文件均为有限 f32 数值，文件字节与首次运行完全相同。运行记录保存在服务器 `runs/device-tree-training-001` / `runs/device-tree-training-002`。
++
++## 尚未完成
++
++第一阶段尚未完成：`std::tree` 的编译期展开、`Bytes` 与文件接口、原生树检查点仍需实现。DDPM 的参数生成器因此暂未删除。设备随机数、完整常驻训练步、传输统计、真正的 bf16 存储、重计算、耐久性与四卡训练继续按设计阶段推进；先前的 NCCL 草稿已独立暂存，不作为可用功能。
++
++手动运行还暴露了已有的声明类型问题：`let p: Model = { ...带具体形状的张量... }` 通过结构可赋值检查后，又因结构体的显式转换只接受相同类型而被拒绝。当前示例通过返回类型为 `Model` 的初始化函数构造参数。该缺陷尚未修复；不能为通过测试而修改显式转换的既定语义。
+diff --git a/include/camel/core/type/collection.h b/include/camel/core/type/collection.h
+index f7f86951..31bf225c 100644
+--- a/include/camel/core/type/collection.h
++++ b/include/camel/core/type/collection.h
+@@ -13,7 +13,7 @@
+  *
+  * Author: Zhenjie Wei
+  * Created: Oct. 12, 2026
+- * Updated: Oct. 12, 2026
++ * Updated: Oct. 18, 2026
+  * Supported by: National Key Research and Development Program of China
+  */
+ 
+@@ -74,7 +74,7 @@ class CollectionType : public OtherType {
+     CastSafety castSafetyFrom(Type *sourceType) const override;
+     slot_t castSlotFrom(slot_t value, Type *sourceType) const override;
+     bool assignableFrom(Type *sourceType) const override;
+-    OtherType *
++    Type *
+     cloneWithArguments(std::span<const TypeArgument> arguments, std::string &error) const override;
+ 
+   protected:
+diff --git a/include/camel/core/type/other.h b/include/camel/core/type/other.h
+index f41cce3a..bdf67304 100644
+--- a/include/camel/core/type/other.h
++++ b/include/camel/core/type/other.h
+@@ -13,7 +13,7 @@
+  *
+  * Author: Zhenjie Wei
+  * Created: Oct. 11, 2024
+- * Updated: Apr. 10, 2026
++ * Updated: Oct. 18, 2026
+  * Supported by: National Key Research and Development Program of China
+  */
+ 
+@@ -97,12 +97,14 @@ class OtherType : public Type {
+         return params_ ? std::span<Type *const>(params_, paramCount_) : std::span<Type *const>();
+     }
+ 
+-    virtual OtherType *cloneWithParams(std::span<Type *const> params) const = 0;
++    // A module type constructor may normalize to an ordinary structural type.
++    // Device<{a: A}> is {a: Device<A>}, rather than an opaque wrapper.
++    virtual Type *cloneWithParams(std::span<Type *const> params) const = 0;
+     /// The type `Name<args...>` denotes, arguments in source order. A type that gives its
+     /// constant arguments a meaning overrides this; the default accepts type arguments only
+     /// (and hands them to cloneWithParams). Returns nullptr with `error` set when the arguments
+     /// are not ones the type accepts; the compiler reports that at the type expression.
+-    virtual OtherType *
++    virtual Type *
+     cloneWithArguments(std::span<const TypeArgument> arguments, std::string &error) const;
+ 
+     /// Whether the arguments of this type are plain types and nothing else (`Map<K, V>`), as
+diff --git a/modules/tiles/CMakeLists.txt b/modules/tiles/CMakeLists.txt
+index e24b2fa4..5927001a 100644
+--- a/modules/tiles/CMakeLists.txt
++++ b/modules/tiles/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ include(${CMAKE_CURRENT_SOURCE_DIR}/../camel_module.cmake)
+ add_camel_module(
+   NAME tiles
+-  SOURCES src/resident_storage.cpp src/module.cpp src/dispatch.cpp src/graph_values.cpp src/graph_regions.cpp src/region_extract.cpp src/region_outline.cpp src/region_test_pass.cpp src/region_pass.cpp src/compiler.cpp src/compiled_region.cpp src/row_kernel.cpp src/row_body.cpp src/codegen.cpp src/codegen_cache.cpp src/scalar_expr.cpp src/index_expr.cpp src/access.cpp src/kernel_ir.cpp src/matmul_kernel.cpp src/serial_kernel.cpp src/pointwise_kernel.cpp src/reduction_kernel.cpp src/regions.cpp src/scalar_kernel.cpp src/loop_kernel.cpp src/parallel_kernel.cpp src/cuda.cpp src/mixed_gemm.cpp src/cuda_backend.cpp src/cuda_pool.cpp src/capability.cpp src/cuda_resources.cpp src/cuda_submission.cpp src/schedule.cpp src/device.cpp
++  SOURCES src/tree_transfer.cpp src/resident_storage.cpp src/module.cpp src/dispatch.cpp src/graph_values.cpp src/graph_regions.cpp src/region_extract.cpp src/region_outline.cpp src/region_test_pass.cpp src/region_pass.cpp src/compiler.cpp src/compiled_region.cpp src/row_kernel.cpp src/row_body.cpp src/codegen.cpp src/codegen_cache.cpp src/scalar_expr.cpp src/index_expr.cpp src/access.cpp src/kernel_ir.cpp src/matmul_kernel.cpp src/serial_kernel.cpp src/pointwise_kernel.cpp src/reduction_kernel.cpp src/regions.cpp src/scalar_kernel.cpp src/loop_kernel.cpp src/parallel_kernel.cpp src/cuda.cpp src/mixed_gemm.cpp src/cuda_backend.cpp src/cuda_pool.cpp src/capability.cpp src/cuda_resources.cpp src/cuda_submission.cpp src/schedule.cpp src/device.cpp
+   EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
+   EXTRA_LIBS tensor_cmo nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS}
+ )
+diff --git a/modules/tiles/include/tiles/device.h b/modules/tiles/include/tiles/device.h
+index d6f241c8..b6316171 100644
+--- a/modules/tiles/include/tiles/device.h
++++ b/modules/tiles/include/tiles/device.h
+@@ -63,8 +63,9 @@ class DeviceType final : public core::type::OtherType {
+     core::type::CastSafety castSafetyFrom(core::type::Type *other) const override;
+     slot_t castSlotFrom(slot_t value, core::type::Type *other) const override;
+     bool typeArguments() const override;
+-    core::type::OtherType *
+-    cloneWithParams(std::span<core::type::Type *const> params) const override;
++    core::type::Type *cloneWithParams(std::span<core::type::Type *const> params) const override;
++    core::type::Type *cloneWithArguments(
++        std::span<const core::type::TypeArgument> arguments, std::string &error) const override;
+ 
+   private:
+     explicit DeviceType(core::type::Type *host);
+diff --git a/modules/tiles/include/tiles/internal/tree_transfer.h b/modules/tiles/include/tiles/internal/tree_transfer.h
+new file mode 100644
+index 00000000..3bce0992
+--- /dev/null
++++ b/modules/tiles/include/tiles/internal/tree_transfer.h
+@@ -0,0 +1,18 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Type-directed transfers preserve struct declarations and tuple nesting.
++#pragma once
++#include "camel/execute/executor.h"
++
++namespace camel::tiles {
++core::type::Type *transferTreeType(core::type::Type *type, bool upload);
++slot_t transferTree(ArgsView &norm, bool upload);
++} // namespace camel::tiles
+diff --git a/modules/tiles/src/device.cpp b/modules/tiles/src/device.cpp
+index 71c494ba..9446f747 100644
+--- a/modules/tiles/src/device.cpp
++++ b/modules/tiles/src/device.cpp
+@@ -4,13 +4,15 @@
+  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
+  * Author: Camel Contributors
+  * Created: Oct. 15, 2026
+- * Updated: Oct. 15, 2026
++ * Updated: Oct. 18, 2026
+  * Supported by: National Key Research and Development Program of China
+  */
+ 
+ // Interned device storage types preserve the host tensor's static refinements.
+ #include "tiles/device.h"
+ #include "camel/core/mm.h"
++#include "camel/core/type/composite/struct.h"
++#include "camel/core/type/composite/tuple.h"
+ #include "modules/tensor/type.h"
+ #include <mutex>
+ #include <unordered_map>
+@@ -24,7 +26,8 @@ TypeCode DeviceType::typeCode() {
+ DeviceType::DeviceType(Type *host)
+     : OtherType(typeCode(), 1, copyParams(std::span<Type *const>(&host, 1))) {}
+ DeviceType *DeviceType::get(Type *host) {
+-    if (!tensor::asTensorType(host) && host->code() != TypeCode::Float64)
++    if (!tensor::asTensorType(host) && host->code() != TypeCode::Float64 &&
++        host->code() != TypeCode::TypeVar)
+         throw std::runtime_error("Device requires a tensor or float type");
+     static std::mutex mutex;
+     static std::unordered_map<Type *, DeviceType *> types;
+@@ -65,11 +68,57 @@ slot_t DeviceType::castSlotFrom(slot_t value, Type *other) const {
+     return value;
+ }
+ bool DeviceType::typeArguments() const { return true; }
+-OtherType *DeviceType::cloneWithParams(std::span<Type *const> params) const {
+-    if (params.size() != 1 ||
+-        (!tensor::asTensorType(params[0]) && params[0]->code() != TypeCode::Float64))
++namespace {
++Type *distributeDevice(Type *host, const std::string &path, std::string &error) {
++    if (host->code() == TypeCode::Tuple) {
++        auto *tuple = static_cast<TupleType *>(host);
++        // Nullable/fallible boxes and mutable cells are not ordinary tuple trees.
++        if (tuple->isTagged() || tuple->isCell()) {
++            error = "Device leaf '" + path + "' has unsupported type " + host->toString();
++            return nullptr;
++        }
++        type_vec_t fields;
++        for (size_t i = 0; i < tuple->size(); ++i) {
++            auto *field = distributeDevice(tuple->typeAt(i), path + "." + std::to_string(i), error);
++            if (!field)
++                return nullptr;
++            fields.push_back(field);
++        }
++        return TupleType::create(fields);
++    }
++    if (host->code() == TypeCode::Struct) {
++        auto *record = static_cast<StructType *>(host);
++        StructTypeFactory fields;
++        for (size_t i = 0; i < record->size(); ++i) {
++            const std::string name(record->fieldName(i));
++            auto *field = distributeDevice(record->typeAt(i), path + "." + name, error);
++            if (!field)
++                return nullptr;
++            fields.add(name, field);
++        }
++        return fields.build();
++    }
++    if (tensor::asTensorType(host) || host->code() == TypeCode::Float64 ||
++        host->code() == TypeCode::TypeVar)
++        return DeviceType::get(host);
++    error = "Device leaf '" + path + "' has unsupported type " + host->toString() +
++            "; expected a tensor or float";
++    return nullptr;
++}
++} // namespace
++Type *DeviceType::cloneWithParams(std::span<Type *const> params) const {
++    if (params.size() != 1)
++        return nullptr;
++    std::string error;
++    return distributeDevice(params[0], "$", error);
++}
++Type *
++DeviceType::cloneWithArguments(std::span<const TypeArgument> arguments, std::string &error) const {
++    if (arguments.size() != 1 || !arguments[0].type) {
++        error = "Device takes exactly one type argument";
+         return nullptr;
+-    return get(params[0]);
++    }
++    return distributeDevice(arguments[0].type, "$", error);
+ }
+ const DeviceType *asDeviceType(const Type *type) {
+     return type && type->code() == DeviceType::typeCode() ? static_cast<const DeviceType *>(type)
+diff --git a/modules/tiles/src/module.cpp b/modules/tiles/src/module.cpp
+index 28ea1f5a..2d8e67dc 100644
+--- a/modules/tiles/src/module.cpp
++++ b/modules/tiles/src/module.cpp
+@@ -32,6 +32,7 @@
+ #include "tiles/internal/dispatch.h"
+ #include "tiles/internal/graph_values.h"
+ #include "tiles/internal/regions.h"
++#include "tiles/internal/tree_transfer.h"
+ #include "tiles/program.h"
+ #include <cstdlib>
+ #include <cstring>
+@@ -228,43 +229,10 @@ slot_t runCompiledDeviceKernel(ArgsView &with, ArgsView &norm, Context &ctx) {
+     return runResidentPrepared(with, std::move(program));
+ }
+ slot_t uploadKernel(ArgsView &, ArgsView &norm, Context &) {
+-    return checked([&] {
+-        if (norm.type(0)->code() == TypeCode::Float64) {
+-            double value = norm.get<double>(0);
+-            return wrapDevice(uploadValue({}, DType::F64, std::as_bytes(std::span(&value, 1))));
+-        }
+-        Shape shape;
+-        std::vector<float> data;
+-        {
+-            core::mm::NoCollectionScope noCollection;
+-            auto *tensor = norm.get<tensor::TensorObject *>(0);
+-            if (tensor->dtype() != TypeCode::Float32)
+-                throw std::runtime_error("upload currently requires f32 tensors");
+-            shape              = tensor->shapeVector();
+-            const size_t count = elements(shape);
+-            if (count)
+-                data.assign(tensor->dataAs<float>(), tensor->dataAs<float>() + count);
+-        }
+-        auto resident = uploadValue(shape, DType::F32, std::as_bytes(std::span(data)));
+-        return wrapDevice(std::move(resident));
+-    });
++    return checked([&] { return transferTree(norm, true); });
+ }
+ slot_t downloadKernel(ArgsView &, ArgsView &norm, Context &) {
+-    return checked([&] {
+-        auto *wrapper = norm.get<td::ForeignResourceObject *>(0);
+-        auto resident = *wrapper->resourceAs<std::shared_ptr<DeviceValue>>();
+-        auto data     = downloadValue(*resident);
+-        if (resident->dtype == DType::F64) {
+-            double value;
+-            std::memcpy(&value, data.data(), sizeof(value));
+-            return td::toSlot(value);
+-        }
+-        auto *out =
+-            tensor::TensorObject::create(TypeCode::Float32, resident->shape, core::mm::autoSpace());
+-        if (!data.empty())
+-            std::memcpy(out->rawData(), data.data(), data.size());
+-        return td::toSlot(out);
+-    });
++    return checked([&] { return transferTree(norm, false); });
+ }
+ // Called only while collection is inhibited; aggregates are rebuilt with exact types.
+ slot_t hostResidentValue(Type *hostType, slot_t value, bool retain) {
+@@ -564,7 +532,7 @@ class TilesModule final : public BuiltinModule {
+                     {{"tiles:" + name,
+                       DynamicFuncTypeResolver::create(
+                           {{0, {}}, {1, {false}}},
+-                          name == "upload" ? "(T: Tensor or float) => Device<T>"
++                          name == "upload" ? "(T: Tensor, float, struct or tuple) => Device<T>"
+                                            : "(Device<T>) => T",
+                           [upload = name == "upload"](
+                               const type_vec_t &with,
+@@ -572,18 +540,8 @@ class TilesModule final : public BuiltinModule {
+                               const ModifierSet &) -> std::optional<Type *> {
+                               if (!with.empty() || norm.size() != 1)
+                                   return std::nullopt;
+-                              if (upload) {
+-                                  if (norm[0]->code() == TypeCode::Float64)
+-                                      return DeviceType::get(norm[0]);
+-                                  const auto *tensor = tensor::asTensorType(norm[0]);
+-                                  if (!tensor ||
+-                                      (tensor->dtype() && *tensor->dtype() != TypeCode::Float32))
+-                                      return std::nullopt;
+-                                  return DeviceType::get(norm[0]);
+-                              }
+-                              const auto *device = asDeviceType(norm[0]);
+-                              return device ? std::optional<Type *>(device->hostType())
+-                                            : std::nullopt;
++                              auto *result = transferTreeType(norm[0], upload);
++                              return result ? std::optional<Type *>(result) : std::nullopt;
+                           })}}));
+         }
+         std::vector<std::string>
+diff --git a/modules/tiles/src/tree_transfer.cpp b/modules/tiles/src/tree_transfer.cpp
+new file mode 100644
+index 00000000..68d43cce
+--- /dev/null
++++ b/modules/tiles/src/tree_transfer.cpp
+@@ -0,0 +1,180 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Snapshot all leaves before CUDA calls; no moving-heap pointers cross that boundary.
++#include "tiles/internal/tree_transfer.h"
++#include "camel/core/mm/gen.h"
++#include "camel/core/rtdata/foreign.h"
++#include "camel/core/rtdata/struct.h"
++#include "camel/core/rtdata/tuple.h"
++#include "camel/core/type/composite/struct.h"
++#include "camel/core/type/composite/tuple.h"
++#include "modules/tensor/tensor.h"
++#include "modules/tensor/type.h"
++#include "tiles/device.h"
++#include <cstring>
++
++namespace camel::tiles {
++using namespace core::type;
++namespace td = core::rtdata;
++Type *transferTreeType(Type *type, bool upload) {
++    if (type->code() == TypeCode::Tuple) {
++        auto *tuple = static_cast<TupleType *>(type);
++        if (tuple->isTagged() || tuple->isCell())
++            return nullptr;
++        type_vec_t fields;
++        for (size_t i = 0; i < tuple->size(); ++i) {
++            auto *field = transferTreeType(tuple->typeAt(i), upload);
++            if (!field)
++                return nullptr;
++            fields.push_back(field);
++        }
++        return TupleType::create(fields);
++    }
++    if (type->code() == TypeCode::Struct) {
++        auto *record = static_cast<StructType *>(type);
++        StructTypeFactory fields;
++        for (size_t i = 0; i < record->size(); ++i) {
++            auto *field = transferTreeType(record->typeAt(i), upload);
++            if (!field)
++                return nullptr;
++            fields.add(std::string(record->fieldName(i)), field);
++        }
++        return fields.build();
++    }
++    if (!upload) {
++        const auto *device = asDeviceType(type);
++        return device ? device->hostType() : nullptr;
++    }
++    if (type->code() == TypeCode::Float64)
++        return DeviceType::get(type);
++    const auto *tensor = tensor::asTensorType(type);
++    return tensor && (!tensor->dtype() || *tensor->dtype() == TypeCode::Float32)
++               ? DeviceType::get(type)
++               : nullptr;
++}
++namespace {
++struct Leaf {
++    Shape shape;
++    DType dtype;
++    std::vector<std::byte> bytes;
++    std::shared_ptr<DeviceValue> device;
++};
++template <class F> slot_t walk(Type *type, slot_t value, F &leaf) {
++    if (type->code() == TypeCode::Tuple) {
++        auto *tuple = static_cast<TupleType *>(type);
++        auto *input = td::fromSlot<::Tuple *>(value);
++        for (size_t i = 0; i < tuple->size(); ++i)
++            walk(tuple->typeAt(i), input->get<slot_t>(i), leaf);
++    } else if (type->code() == TypeCode::Struct) {
++        auto *record = static_cast<StructType *>(type);
++        auto *input  = td::fromSlot<::Struct *>(value);
++        for (size_t i = 0; i < record->size(); ++i)
++            walk(record->typeAt(i), input->get<slot_t>(i), leaf);
++    } else {
++        leaf(type, value);
++    }
++    return value;
++}
++template <class F> slot_t rebuild(Type *type, F &leaf) {
++    if (type->code() == TypeCode::Tuple) {
++        auto *tuple = static_cast<TupleType *>(type);
++        auto *out   = ::Tuple::create(tuple->size(), core::mm::autoSpace());
++        for (size_t i = 0; i < tuple->size(); ++i)
++            out->set(i, rebuild(tuple->typeAt(i), leaf), tuple);
++        return td::toSlot(out);
++    }
++    if (type->code() == TypeCode::Struct) {
++        auto *record = static_cast<StructType *>(type);
++        auto *out    = ::Struct::create(record->size(), core::mm::autoSpace());
++        for (size_t i = 0; i < record->size(); ++i)
++            out->set(i, rebuild(record->typeAt(i), leaf), record);
++        return td::toSlot(out);
++    }
++    return leaf(type);
++}
++} // namespace
++slot_t transferTree(ArgsView &norm, bool upload) {
++    auto *outputType = transferTreeType(norm.type(0), upload);
++    if (!outputType)
++        throw std::runtime_error("unsupported transfer tree type");
++    std::vector<Leaf> leaves;
++    {
++        core::mm::NoCollectionScope guard;
++        auto snapshot = [&](Type *type, slot_t value) {
++            Leaf out{};
++            if (!upload) {
++                auto *wrapper = td::fromSlot<td::ForeignResourceObject *>(value);
++                out.device    = *wrapper->resourceAs<std::shared_ptr<DeviceValue>>();
++                out.shape     = out.device->shape;
++                out.dtype     = out.device->dtype;
++            } else if (type->code() == TypeCode::Float64) {
++                out.dtype = DType::F64;
++                out.bytes.resize(sizeof(double));
++                const double scalar = td::fromSlot<double>(value);
++                std::memcpy(out.bytes.data(), &scalar, sizeof(scalar));
++            } else {
++                auto *tensor = td::fromSlot<tensor::TensorObject *>(value);
++                if (tensor->dtype() != TypeCode::Float32)
++                    throw std::runtime_error("upload currently requires f32 tensor leaves");
++                out.dtype = DType::F32;
++                out.shape = tensor->shapeVector();
++                out.bytes.resize(elements(out.shape) * sizeof(float));
++                if (!out.bytes.empty())
++                    std::memcpy(out.bytes.data(), tensor->rawData(), out.bytes.size());
++            }
++            leaves.push_back(std::move(out));
++        };
++        walk(norm.type(0), norm.slot(0), snapshot);
++    }
++    for (auto &leaf : leaves) {
++        if (upload) {
++            leaf.device = uploadValue(leaf.shape, leaf.dtype, leaf.bytes);
++            leaf.bytes.clear();
++        } else {
++            leaf.bytes = downloadValue(*leaf.device);
++        }
++    }
++    core::mm::NoCollectionScope guard;
++    size_t index     = 0;
++    auto materialize = [&](Type *type) -> slot_t {
++        auto &leaf = leaves.at(index++);
++        if (upload) {
++            auto owner = std::make_unique<std::shared_ptr<DeviceValue>>(std::move(leaf.device));
++            td::ForeignResourceDescriptor descriptor;
++            descriptor.kind    = "tiles.Device";
++            descriptor.deleter = [](void *p) {
++                delete static_cast<std::shared_ptr<DeviceValue> *>(p);
++            };
++            auto *wrapper = td::ForeignResourceObject::create(
++                core::mm::autoSpace(),
++                std::move(descriptor),
++                owner.get());
++            owner.release();
++            return td::toSlot(wrapper);
++        }
++        if (type->code() == TypeCode::Float64) {
++            if (leaf.dtype != DType::F64 || leaf.bytes.size() != sizeof(double))
++                throw std::runtime_error("download scalar type mismatch");
++            double value;
++            std::memcpy(&value, leaf.bytes.data(), sizeof(value));
++            return td::toSlot(value);
++        }
++        if (leaf.dtype != DType::F32 || leaf.bytes.size() != elements(leaf.shape) * sizeof(float))
++            throw std::runtime_error("download tensor type mismatch");
++        auto *out =
++            tensor::TensorObject::create(TypeCode::Float32, leaf.shape, core::mm::autoSpace());
++        if (!leaf.bytes.empty())
++            std::memcpy(out->rawData(), leaf.bytes.data(), leaf.bytes.size());
++        return td::toSlot(out);
++    };
++    return rebuild(outputType, materialize);
++}
++} // namespace camel::tiles
+diff --git a/src/core/type/collection.cpp b/src/core/type/collection.cpp
+index a62e6d70..94f8295f 100644
+--- a/src/core/type/collection.cpp
++++ b/src/core/type/collection.cpp
+@@ -13,7 +13,7 @@
+  *
+  * Author: Zhenjie Wei
+  * Created: Oct. 12, 2026
+- * Updated: Oct. 13, 2026
++ * Updated: Oct. 18, 2026
+  * Supported by: National Key Research and Development Program of China
+  */
+ 
+@@ -25,11 +25,11 @@
+ 
+ #include "camel/core/error/runtime.h"
+ #include "camel/core/mm.h"
+-#include "camel/core/type/storage.h"
+ #include "camel/core/rtdata/collection.h"
+ #include "camel/core/type/composite/func.h"
+ #include "camel/core/type/composite/struct.h"
+ #include "camel/core/type/composite/union.h"
++#include "camel/core/type/storage.h"
+ #include "camel/core/type/typevar.h"
+ #include "camel/utils/assert.h"
+ 
+@@ -69,8 +69,8 @@ std::string collectionKeyProblem(Type *type) {
+         }
+         for (Type *member : tuple->types()) {
+             if (std::string problem = collectionKeyProblem(member); !problem.empty()) {
+-                return "its element of type '" + member->toString() + "' cannot be a key: " +
+-                       problem;
++                return "its element of type '" + member->toString() +
++                       "' cannot be a key: " + problem;
+             }
+         }
+         return "";
+@@ -202,7 +202,7 @@ slot_t CollectionType::castSlotFrom(slot_t value, Type *sourceType) const {
+     return rtdata::toSlot(rtdata::table::fromArray(array, this));
+ }
+ 
+-OtherType *CollectionType::cloneWithArguments(
++Type *CollectionType::cloneWithArguments(
+     std::span<const TypeArgument> arguments, std::string &error) const {
+     const size_t expected = isMap_ ? 2 : 1;
+     const char *usage     = isMap_ ? "Map<K, V>" : "Set<T>";
+@@ -346,9 +346,7 @@ std::string SetType::toString() const {
+     return complete() ? "Set<" + params_[0]->toString() + ">" : "Set";
+ }
+ 
+-std::string SetType::mangle() const {
+-    return complete() ? "Ds" + params_[0]->mangle() : "Ds0";
+-}
++std::string SetType::mangle() const { return complete() ? "Ds" + params_[0]->mangle() : "Ds0"; }
+ 
+ OtherType *SetType::cloneWithParams(std::span<Type *const> params) const {
+     ASSERT(params.size() == 1, "Set takes an element type.");
+diff --git a/src/core/type/other.cpp b/src/core/type/other.cpp
+index 32a94099..638142af 100644
+--- a/src/core/type/other.cpp
++++ b/src/core/type/other.cpp
+@@ -13,7 +13,7 @@
+  *
+  * Author: Zhenjie Wei
+  * Created: Oct. 11, 2024
+- * Updated: Oct. 13, 2026
++ * Updated: Oct. 18, 2026
+  * Supported by: National Key Research and Development Program of China
+  */
+ 
+@@ -48,7 +48,7 @@ std::string OtherType::typeName() const {
+     return OtherTypeRegistry::getTypeName(code_);
+ }
+ 
+-OtherType *
++Type *
+ OtherType::cloneWithArguments(std::span<const TypeArgument> arguments, std::string &error) const {
+     std::vector<Type *> types;
+     types.reserve(arguments.size());
+@@ -67,7 +67,7 @@ Type **OtherType::copyParams(std::span<Type *const> params) {
+         return nullptr;
+     size_t n     = params.size();
+     void *arrMem = allocTypeStorage(TypeStorageKind::Params, n * sizeof(Type *), alignof(Type *));
+-    Type **p = static_cast<Type **>(arrMem);
++    Type **p     = static_cast<Type **>(arrMem);
+     for (size_t i = 0; i < n; ++i)
+         p[i] = params[i];
+     return p;
+diff --git a/test/cases/modules/tiles/device_tree.cml b/test/cases/modules/tiles/device_tree.cml
+new file mode 100644
+index 00000000..421cba71
+--- /dev/null
++++ b/test/cases/modules/tiles/device_tree.cml
+@@ -0,0 +1,33 @@
++module tiles_device_tree
++import { Tensor, reshape, sum, abs, zeros } from tensor
++import { value_and_grad } from autodiff
++import { Device, upload, download, run_device } from tiles
++
++type Model = { weight: Tensor<f32>, block: (Tensor<f32>, float) }
++type ExplicitDeviceModel = { weight: Device<Tensor<f32>>, block: (Device<Tensor<f32>>, Device<float>) }
++func identity(p: Device<Model>): ExplicitDeviceModel { return p }
++func typed_upload(p: typeas P): Device<P> sync { return upload(p) }
++func loss(p: Model): float { return sum(p.weight * p.weight) + sum(p.block.0 * p.block.0) }
++func descend(p: Model, g: Model): Model {
++    return { weight: p.weight - g.weight * 0.01, block: (p.block.0 - g.block.0 * 0.01, p.block.1) }
++}
++func initialize(): Model {
++    return { weight: reshape([1.0, 2.0, 3.0], [3]), block: (zeros([0, 2]), 1.0000000000000002) }
++}
++func main(): int sync {
++    let p = initialize()
++    let resident: Device<Model> = identity(typed_upload(p))
++    let restored: Model = download(resident)
++    println(sum(abs(restored.weight - p.weight)))
++    println(sum(restored.block.0))
++    println(restored.block.1 - p.block.1)
++    let vg = value_and_grad(loss)
++    let measured: (Device<float>, Device<Model>) = run_device<vg>(resident)
++    println(download(measured.0) - loss(p))
++    let updated: Device<Model> = run_device<descend>((resident, measured.1))
++    let actual: Model = download(updated)
++    let expected: Model = descend(p, vg(p).1)
++    println(sum(abs(actual.weight - expected.weight)))
++    println(download(resident).block.1 - p.block.1)
++    return 0
++}
+diff --git a/test/cases/modules/tiles/device_tree_invalid.cml b/test/cases/modules/tiles/device_tree_invalid.cml
+new file mode 100644
+index 00000000..de3008e6
+--- /dev/null
++++ b/test/cases/modules/tiles/device_tree_invalid.cml
+@@ -0,0 +1,4 @@
++module tiles_device_tree_invalid
++import { Device } from tiles
++type Invalid = Device<{ block: (float, { label: string }) }>
++func main(): int { return 0 }
+diff --git a/test/plans/feat/modules/tiles.plan.toml b/test/plans/feat/modules/tiles.plan.toml
+index 4a61f10d..2e0a82f6 100644
+--- a/test/plans/feat/modules/tiles.plan.toml
++++ b/test/plans/feat/modules/tiles.plan.toml
+@@ -432,3 +432,12 @@ args = ["${case}"]
+ expect_exit = 0
+ expect_stdout_contains = ["Public Tiles pass: module loading and deferred target selection PASS"]
+ timeout_ms = 20000
++[[tests]]
++name = "device_tree_rejects_unsupported_leaf_with_path"
++kind = "negative"
++case = "../../../cases/modules/tiles/device_tree_invalid.cml"
++args = ["${case}", "std::nvm"]
++envs = ["CAMEL_TILES_DEVICE=invalid"]
++expect_exit = 1
++expect_output_contains = ["Device leaf '$.block.1.label'", "unsupported type string"]
++timeout_ms = 10000
+diff --git a/test/plans/gpu/tiles_transfer.plan.toml b/test/plans/gpu/tiles_transfer.plan.toml
+index fba973f7..7bb228ca 100644
+--- a/test/plans/gpu/tiles_transfer.plan.toml
++++ b/test/plans/gpu/tiles_transfer.plan.toml
+@@ -3,6 +3,15 @@ order = 901
+ tier = "gpu"
+ tags = ["gpu", "modules", "tiles"]
+ 
++[[tests]]
++name = "device_parameter_tree_training"
++kind = "behavior"
++case = "../../cases/modules/tiles/device_tree.cml"
++args = ["${case}", "std::macro", "std::nvm"]
++expect_exit = 0
++expect_stdout_exact = "0.0\n0.0\n0.0\n0.0\n0.0\n0.0\n"
++timeout_ms = 60000
++
+ [[tests]]
+ name = "large_upload_completion"
+ kind = "behavior"
+-- 
+2.51.0.windows.1
+

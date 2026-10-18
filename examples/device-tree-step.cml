@@ -1,0 +1,50 @@
+// Native parameter-tree integration for Camel's training infrastructure design.
+// Run on the server with the device-tree runtime; all learned weights start fresh.
+module device_tree_step
+import { AE, initAE, zeroAE, stepAE, distanceAE } from params_ae
+import { LD, initLD, zeroLD, stepLD, distanceLD } from params_ld
+import { ae_grad, image_mean, ld_grad } from networks
+import { train_batch } from latent_data
+import { Tensor, seed, randn, set_num_threads } from tensor
+import { seed as random_seed } from random
+import { Device, upload, download, run_device } from tiles
+import { read_text } from fs
+import { trim, split } from str
+import { embedding } from ddpm
+import { save_params } from nn
+
+type Parameters = { ae: AE, ld: LD }
+func initialize(): Parameters { return { ae: initAE(), ld: initLD() } }
+func zero(p: Parameters): Parameters { return { ae: zeroAE(p.ae), ld: zeroLD(p.ld) } }
+func noisy(z: Tensor<f32>, noise: Tensor<f32>): Tensor<f32> { return z * 0.8 + noise * 0.6 }
+func main(data: string, index: string, out: string): int sync {
+    set_num_threads(1)
+    seed(20261018)
+    random_seed(20261018)
+    let initial = initialize()
+    let p: Device<Parameters> = upload(initial)
+    let zeros: Device<Parameters> = upload(zero(initial))
+    let ids = read_text(index)->trim->split<'\n'>
+    let batch = train_batch(ids, data, 1)
+    let pixels = upload(batch.image)
+    let noise = upload(randn([1, 64, 4]))
+    let ag: (Device<float>, Device<AE>) = run_device<ae_grad>((p.ae, pixels, noise))
+    let a: Device<(AE, AE, AE)> = run_device<stepAE>((p.ae, ag.1, zeros.ae, zeros.ae, 0.00001, 0.1, 0.001))
+    let latent = run_device<image_mean>((a.0, pixels))
+    let x = run_device<noisy>((latent, noise))
+    let dg: (Device<float>, Device<LD>) = run_device<ld_grad>((p.ld, x, batch.text, embedding(10) as Tensor<f32>, noise))
+    let d: Device<(LD, LD, LD)> = run_device<stepLD>((p.ld, dg.1, zeros.ld, zeros.ld, 0.00001, 0.1, 0.001))
+    let aloss = download(ag.0)
+    let dloss = download(dg.0)
+    let adelta = download(run_device<distanceAE>((p.ae, a.0)))
+    let ddelta = download(run_device<distanceLD>((p.ld, d.0)))
+    if !(aloss >= 0.0 && aloss < 10000000000.0 && dloss >= 0.0 && dloss < 10000000000.0 && adelta > 0.0 && adelta < 10000000000.0 && ddelta > 0.0 && ddelta < 10000000000.0) then sync {
+        println('DEVICE_TREE invalid loss or parameter update')
+        exit(1)
+    }
+    // Download nested optimizer trees directly; no generated upload/download helpers.
+    save_params(download(a), out + '/ae')
+    save_params(download(d), out + '/ld')
+    println('DEVICE_TREE ae_loss={} ld_loss={} ae_delta={} ld_delta={}'->format<aloss, dloss, adelta, ddelta>)
+    return 0
+}

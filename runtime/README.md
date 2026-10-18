@@ -65,3 +65,14 @@ FP32-reference comparisons and server results are in
 No patched binaries or source checkout are needed after installation: `.camel/`
 is a complete independent runtime snapshot. The installation manifest records
 where that snapshot came from; it is provenance, not an execution dependency.
+
+The optional `camel-device-trees.patch` records Camel commit `1b724238`:
+`Device<Parameters>` normalizes struct/tuple fields, and `upload`/`download`
+transfer complete parameter trees. It applies on top of the integrated DDPM
+primitives and the October 18 training design. Skip it when that commit is
+already present upstream. The server built this into independent
+`.camel-device-tree-v1` / `.camel-device-tree-v2` installations; the default
+`.camel` runtime was preserved. The new example requires this capability:
+[`device-tree-step.cml`](../examples/device-tree-step.cml).
+Actual model updates and checkpoint replay results are documented in
+[`device-tree-training.md`](../docs/results/device-tree-training.md).
