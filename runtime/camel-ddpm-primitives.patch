@@ -76,6 +76,46 @@ index 9b756f08..d7890293 100644
      loaded_ = true;
      return true;
  }
+diff --git a/modules/tiles/CMakeLists.txt b/modules/tiles/CMakeLists.txt
+index 37a1389f..e24b2fa4 100644
+--- a/modules/tiles/CMakeLists.txt
++++ b/modules/tiles/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ include(${CMAKE_CURRENT_SOURCE_DIR}/../camel_module.cmake)
+ add_camel_module(
+   NAME tiles
+-  SOURCES src/resident_storage.cpp src/module.cpp src/dispatch.cpp src/graph_values.cpp src/graph_regions.cpp src/region_extract.cpp src/region_outline.cpp src/region_test_pass.cpp src/region_pass.cpp src/compiler.cpp src/compiled_region.cpp src/row_kernel.cpp src/row_body.cpp src/codegen.cpp src/codegen_cache.cpp src/scalar_expr.cpp src/index_expr.cpp src/access.cpp src/kernel_ir.cpp src/matmul_kernel.cpp src/serial_kernel.cpp src/pointwise_kernel.cpp src/reduction_kernel.cpp src/regions.cpp src/scalar_kernel.cpp src/loop_kernel.cpp src/parallel_kernel.cpp src/cuda.cpp src/cuda_backend.cpp src/cuda_pool.cpp src/capability.cpp src/cuda_resources.cpp src/cuda_submission.cpp src/schedule.cpp src/device.cpp
++  SOURCES src/resident_storage.cpp src/module.cpp src/dispatch.cpp src/graph_values.cpp src/graph_regions.cpp src/region_extract.cpp src/region_outline.cpp src/region_test_pass.cpp src/region_pass.cpp src/compiler.cpp src/compiled_region.cpp src/row_kernel.cpp src/row_body.cpp src/codegen.cpp src/codegen_cache.cpp src/scalar_expr.cpp src/index_expr.cpp src/access.cpp src/kernel_ir.cpp src/matmul_kernel.cpp src/serial_kernel.cpp src/pointwise_kernel.cpp src/reduction_kernel.cpp src/regions.cpp src/scalar_kernel.cpp src/loop_kernel.cpp src/parallel_kernel.cpp src/cuda.cpp src/mixed_gemm.cpp src/cuda_backend.cpp src/cuda_pool.cpp src/capability.cpp src/cuda_resources.cpp src/cuda_submission.cpp src/schedule.cpp src/device.cpp
+   EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/include
+   EXTRA_LIBS tensor_cmo nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS}
+ )
+@@ -16,7 +16,7 @@ target_link_libraries(tiles-plan-check PRIVATE libcamel fmt::fmt)
+ # Load the driver and NVRTC lazily: importing tiles never requires a GPU.
+ find_package(CUDAToolkit QUIET)
+ if(CUDAToolkit_FOUND)
+-  add_executable(tiles-async-check ../../test/cases/modules/tiles/async_submission_check.cpp ../../test/cases/modules/tiles/async_submission_lifetime.cpp ../../test/cases/modules/tiles/memory_pool_check.cpp ../../test/cases/modules/tiles/memory_pool_failures.cpp src/resident_storage.cpp src/cuda.cpp src/cuda_backend.cpp src/cuda_pool.cpp src/cuda_resources.cpp src/cuda_submission.cpp src/capability.cpp src/row_kernel.cpp src/row_body.cpp src/codegen.cpp src/codegen_cache.cpp src/schedule.cpp src/scalar_expr.cpp src/index_expr.cpp src/access.cpp src/kernel_ir.cpp src/matmul_kernel.cpp src/serial_kernel.cpp src/pointwise_kernel.cpp src/reduction_kernel.cpp src/regions.cpp src/scalar_kernel.cpp src/loop_kernel.cpp src/parallel_kernel.cpp)
++  add_executable(tiles-async-check ../../test/cases/modules/tiles/async_submission_check.cpp ../../test/cases/modules/tiles/async_submission_lifetime.cpp ../../test/cases/modules/tiles/memory_pool_check.cpp ../../test/cases/modules/tiles/memory_pool_failures.cpp src/resident_storage.cpp src/cuda.cpp src/mixed_gemm.cpp src/cuda_backend.cpp src/cuda_pool.cpp src/cuda_resources.cpp src/cuda_submission.cpp src/capability.cpp src/row_kernel.cpp src/row_body.cpp src/codegen.cpp src/codegen_cache.cpp src/schedule.cpp src/scalar_expr.cpp src/index_expr.cpp src/access.cpp src/kernel_ir.cpp src/matmul_kernel.cpp src/serial_kernel.cpp src/pointwise_kernel.cpp src/reduction_kernel.cpp src/regions.cpp src/scalar_kernel.cpp src/loop_kernel.cpp src/parallel_kernel.cpp)
+   target_compile_features(tiles-async-check PRIVATE cxx_std_23)
+   target_include_directories(tiles-async-check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/third_party)
+   target_link_libraries(tiles-async-check PRIVATE libcamel fmt::fmt nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS})
+diff --git a/modules/tiles/src/codegen.cpp b/modules/tiles/src/codegen.cpp
+index 2c84a48a..d7ccea10 100644
+--- a/modules/tiles/src/codegen.cpp
++++ b/modules/tiles/src/codegen.cpp
+@@ -31,6 +31,13 @@ void kernel::emitCUDA(Program &p) {
+         const Node &n = p.nodes[id];
+         if (n.op == "input")
+             continue;
++        if (launch.implementation == "cublas_bf16") {
++            validateMatmulContract(p, n);
++            code << "// cuBLAS BF16 compute, FP32 boundary: " << launch.name << " shape";
++            for (auto extent : n.shape) code << ' ' << extent;
++            code << '\n';
++            continue;
++        }
+         code << "// " << n.op << "\nextern \"C\" __global__ void " << launch.name
+              << "(float** v) {\n";
+         if (launch.implementation == "row_region") {
 diff --git a/modules/tiles/src/compiler.cpp b/modules/tiles/src/compiler.cpp
 index f0d02a19..d3fa2661 100644
 --- a/modules/tiles/src/compiler.cpp
@@ -230,6 +270,54 @@ index f0d02a19..d3fa2661 100644
          } else if (n.op == "sum_axis" || n.op == "max_axis" || n.op == "mean_axis") {
              n.inputs          = {tensorValue(args.at(0))};
              int64_t axis      = integer(args.at(1));
+diff --git a/modules/tiles/src/cuda.cpp b/modules/tiles/src/cuda.cpp
+index e29d83eb..603e9d4b 100644
+--- a/modules/tiles/src/cuda.cpp
++++ b/modules/tiles/src/cuda.cpp
+@@ -12,6 +12,7 @@
+ #include "tiles/device.h"
+ #include "tiles/internal/capability.h"
+ #include "tiles/internal/submission.h"
++#include "tiles/internal/mixed_gemm.h"
+ #include "tiles/program.h"
+ #include <algorithm>
+ #include <chrono>
+@@ -180,6 +181,9 @@ class DeviceRun {
+     const Program &program;
+     Api &api;
+     std::shared_ptr<Submission> submission;
++    // Before Resources in member order: benchmark storage drains before handle
++    // destruction. Native submissions additionally retain it through completion.
++    std::shared_ptr<MixedGemm> mixedGemm;
+     std::unique_ptr<Resources> ownedResources;
+     Resources &resources;
+     std::vector<CUdeviceptr> pointers;
+@@ -243,6 +247,14 @@ class DeviceRun {
+             std::memcpy(hostInputs[id], data, bytes(node));
+         }
+         for (const auto &launch : p.launches) {
++            if (launch.implementation == "cublas_bf16") {
++                if (!mixedGemm) {
++                    mixedGemm = std::make_shared<MixedGemm>(moduleLease.backend, resources.stream);
++                    if (submission) submission->keepAlive(mixedGemm);
++                }
++                kernels.push_back(nullptr);
++                continue;
++            }
+             CUfunction kernel;
+             api.check(
+                 api.cuModuleGetFunction(&kernel, moduleLease.compiled->module, launch.name.c_str()),
+@@ -275,6 +287,10 @@ class DeviceRun {
+             const auto &s = program.launches[i];
+             if (!s.elements)
+                 continue;
++            if (s.implementation == "cublas_bf16") {
++                mixedGemm->run(program, program.nodes[s.node], pointers);
++                continue;
++            }
+             api.check(
+                 api.cuLaunchKernel(
+                     kernels[i],
 diff --git a/modules/tiles/src/matmul_kernel.cpp b/modules/tiles/src/matmul_kernel.cpp
 index 24f8e043..587ce2b8 100644
 --- a/modules/tiles/src/matmul_kernel.cpp
@@ -367,7 +455,7 @@ index 24f8e043..587ce2b8 100644
              symbol("k_acc")}};
      validateBody(result);
 diff --git a/modules/tiles/src/schedule.cpp b/modules/tiles/src/schedule.cpp
-index bcc96edf..9e6e2e82 100644
+index bcc96edf..81bd1f56 100644
 --- a/modules/tiles/src/schedule.cpp
 +++ b/modules/tiles/src/schedule.cpp
 @@ -304,8 +304,11 @@ void validate(const Program &p, InputBindings bindings) {
@@ -384,6 +472,287 @@ index bcc96edf..9e6e2e82 100644
              kernel::validateMatmulContract(p, n);
          }
          if (n.op == "sum_to")
+@@ -405,6 +408,10 @@ void schedule(Program &p, ScheduleOptions options, InputBindings bindings) {
+         }
+         launch.implementation = "standard";
+         const auto &n         = p.nodes[id];
++        constexpr auto mixed = core::sem::kReassociate | core::sem::kChangePrecision | core::sem::kFiniteMath;
++        if (n.op == "matmul" && (n.permissions & mixed) == mixed &&
++            launch.elements && p.nodes[n.inputs[0]].shape.back() > 0)
++            launch.implementation = "cublas_bf16";
+         if (launch.members.size() > 1 &&
+             std::any_of(launch.members.begin(), launch.members.end(), [&](size_t member) {
+                 return orderedAxis(p.nodes[member].op);
+@@ -508,8 +515,14 @@ void validatePlan(const Program &p, InputBindings bindings) {
+         }
+         require(
+             launch.implementation == "standard" || launch.implementation == "parallel_max" ||
+-                launch.implementation == "ordered_reduce" || launch.implementation == "row_region",
++                launch.implementation == "ordered_reduce" || launch.implementation == "row_region" ||
++                launch.implementation == "cublas_bf16",
+             "unknown implementation");
++        if (launch.implementation == "cublas_bf16") {
++            constexpr auto mixed = core::sem::kReassociate | core::sem::kChangePrecision | core::sem::kFiniteMath;
++            require(p.nodes[launch.node].op == "matmul" &&
++                (p.nodes[launch.node].permissions & mixed) == mixed, "mixed GEMM permissions");
++        }
+         if (launch.implementation == "row_region") {
+             const auto region = kernel::rowKernel(p);
+             require(
+diff --git a/docs/technical/ddpm-primitives.md b/docs/technical/ddpm-primitives.md
+new file mode 100644
+--- /dev/null
++++ b/docs/technical/ddpm-primitives.md
+@@ -0,0 +1,79 @@
++# DDPM experiment: missing runtime primitives
++
++The standalone Camel-DDPM experiment exposed missing scalar/file primitives and
++GPU lowering needed by dense and patch-based denoisers.
++These changes add library capabilities without changing language semantics.
++
++- `math:sqrt` now publishes an f32/f64 VJP in its owning module. It computes
++  `(dy * 0.5) / y` in the result's float width; integer inputs have no tangent.
++  The rule is intended for the differentiable domain `x > 0`; no derivative at
++  zero or outside the real domain is promised. The normal scalar arithmetic
++  fault/IEEE behavior remains in force there.
++- `fs.write_text` writes the string's stored byte length, including embedded
++  NUL. Its binary-mode contract already promised byte-preserving output;
++  streaming `c_str()` had incorrectly truncated PGM images at the first NUL.
++  Write/close failures now raise a file-system fault instead of reporting success.
++- Tiles specializes `tensor:numel` to an integer attribute using the concrete
++  invocation shape. This lets the `mean` VJP compute its denominator without
++  treating the shape query as a device tensor. A second invocation with a
++  different shape is specialized independently.
++- Tiles also specializes `tensor:shape` to a host-only integer-array attribute.
++  Reshape pullbacks consume it using the normal core layout instantiator. No
++  synthetic array pointer survives graph extraction.
++- `tensor:permute_inverse`, emitted by the permutation VJP, lowers to a checked
++  inverse permutation through the core `tensor:permute` index instance. Both
++  operator contracts remain dependencies of the generated plan. Negative axes
++  are normalized and malformed permutations are rejected.
++- Tiles lowers rank-2 and higher matrix products using the existing Tensor core
++  index instance, including singleton and unequal-rank batch broadcasting. Batch
++  coordinates are decoded from grid Y and passed through the core access maps;
++  no alternative broadcasting convention is introduced. Ascending f32 FMA
++  accumulation remains unchanged. Empty output batches perform no operand reads;
++  an empty contraction stores the positive-zero initial accumulator.
++- Matrix pullbacks compose transpose, matmul and sum-to through those same
++  primitives. A shared rank-2 RHS uses the CPU gradient's flattened batch/row
++  GEMM, preserving its single FMA chain rather than rounding independent batch
++  products and adding them afterwards. Rank-1 vector products remain unsupported
++  by Tiles. Launches exceeding the existing CUDA grid-Y limit are rejected.
++
++Each failure was reproduced manually before adding plan assertions. Run:
++
++```powershell
++node scripts/test.js test/plans/feat/modules/ddpm_primitives.plan.toml
++```
++
++The plan checks scalar gradients with runtime/macro construction on NVM/FVM/JIT,
++embedded-NUL file round trips, and GPU-independent CUDA source generation for
++mean/layout gradients with changing shapes. The layout case uses a non-self-inverse
++permutation and negative axes. Batch products additionally cover changed batch
++sizes, rank-3/4 inputs, broadcasting, shared projections and non-tile-aligned
++dimensions. CUDA execution checks an independent integer-valued product, empty
++cases, CPU/GPU forward and gradient agreement and directional finite differences.
++To execute these on CUDA hardware:
++
++```powershell
++camel --arg run_gpu=true test/cases/modules/tiles/mean_grad.cml std::macro std::fvm
++camel --arg run_gpu=true test/cases/modules/tiles/layout_grad.cml std::macro std::fvm
++camel --arg run_gpu=true test/cases/modules/tiles/batch_matmul.cml std::macro std::fvm
++```
++
++The experiment's own tests additionally compare its GPU gradients and Camel Adam
++implementation with the CPU autodiff and `nn.adam` implementations. GPU capability
++checks use explicit Tiles `run`/`run_device`; they cannot silently fall back to CPU.
++
++## Explicit BF16 matrix products
++
++A matrix product with all three lexical grants `reassociate`, `change_precision`,
++and `finite_math` selects `cublas_bf16`. Partial or absent grants keep the existing
++ascending f32 FMA implementation. The optional cuBLAS library is loaded only on
++execution, requires Ampere or newer, and uses COMPUTE_32F_FAST_16BF: FP32 input
++storage, BF16 operand conversion, FP32 accumulation/output, no atomics and no
++reduced-precision reduction. Shared rank-2 projections flatten rows; equal batches
++use strided GEMM; other broadcast patterns use the core batch mapping.
++
++The private handle is bound to the execution stream and retained until completion.
++This is not global half-storage AMP: graph boundaries and optimizer state stay
++FP32. GPU availability or cuBLAS failures are errors, never CPU fallback. Manual
++CUDA verification distinguishes BF16 rounding from strict FP32; full latent-model
++checks compare forward/backward gradients with CPU FP32 references.
++
+diff --git a/modules/tiles/include/tiles/internal/mixed_gemm.h b/modules/tiles/include/tiles/internal/mixed_gemm.h
+new file mode 100644
+--- /dev/null
++++ b/modules/tiles/include/tiles/internal/mixed_gemm.h
+@@ -0,0 +1,30 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Submission-owned cuBLAS BF16 compute, with FP32 graph boundaries and state.
++#pragma once
++#ifdef CAMEL_TILES_CUDA
++#include "tiles/internal/cuda_backend.h"
++#include "tiles/program.h"
++#include <memory>
++#include <vector>
++
++namespace camel::tiles::cuda_detail {
++class MixedGemm {
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++  public:
++    MixedGemm(std::shared_ptr<Backend> backend, CUstream stream);
++    ~MixedGemm();
++    MixedGemm(const MixedGemm &) = delete;
++    void run(const Program &program, const Node &node, const std::vector<CUdeviceptr> &pointers);
++};
++} // namespace camel::tiles::cuda_detail
++#endif
+diff --git a/modules/tiles/src/mixed_gemm.cpp b/modules/tiles/src/mixed_gemm.cpp
+new file mode 100644
+--- /dev/null
++++ b/modules/tiles/src/mixed_gemm.cpp
+@@ -0,0 +1,130 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Optional BF16 cuBLAS lowering. No host tensor computation or precision fallback.
++#include "tiles/internal/mixed_gemm.h"
++#ifdef CAMEL_TILES_CUDA
++#include <cublas_v2.h>
++#include <algorithm>
++#include <climits>
++#include <stdexcept>
++#include <string>
++#include <utility>
++
++namespace camel::tiles::cuda_detail {
++namespace {
++void check(cublasStatus_t status, const char *where) {
++    if (status != CUBLAS_STATUS_SUCCESS)
++        throw std::runtime_error(std::string("cuBLAS BF16 ") + where + " failed: " + std::to_string(status));
++}
++int dimension(size_t size) {
++    if (size > INT_MAX) throw std::runtime_error("cuBLAS BF16 dimension exceeds int32");
++    return static_cast<int>(size);
++}
++// Map an output batch ordinal to the broadcast operand's matrix ordinal.
++size_t batchOffset(size_t ordinal, const Shape &out, const Shape &operand) {
++    size_t offset = 0, stride = 1;
++    for (size_t d = out.size() - 2; d-- > 0;) {
++        const auto coordinate = ordinal % out[d];
++        ordinal /= out[d];
++        const auto shift = out.size() - operand.size();
++        if (d >= shift) {
++            if (operand[d - shift] != 1) offset += coordinate * stride;
++            stride *= operand[d - shift];
++        }
++    }
++    return offset * elements(Shape(operand.end() - 2, operand.end()));
++}
++} // namespace
++
++struct MixedGemm::Impl {
++    std::shared_ptr<Backend> backend;
++    Library library;
++    cublasHandle_t handle = nullptr;
++    decltype(&::cublasCreate_v2) create;
++    decltype(&::cublasDestroy_v2) destroy;
++    decltype(&::cublasSetStream_v2) setStream;
++    decltype(&::cublasSetMathMode) setMath;
++    decltype(&::cublasSetAtomicsMode) setAtomics;
++    using Gemm = cublasStatus_t (*)(cublasHandle_t, cublasOperation_t, cublasOperation_t,
++        int, int, int, const void *, const void *, cudaDataType_t, int,
++        const void *, cudaDataType_t, int, const void *, void *, cudaDataType_t, int,
++        cublasComputeType_t, cublasGemmAlgo_t);
++    using Batched = cublasStatus_t (*)(cublasHandle_t, cublasOperation_t, cublasOperation_t,
++        int, int, int, const void *, const void *, cudaDataType_t, int, long long,
++        const void *, cudaDataType_t, int, long long, const void *, void *, cudaDataType_t,
++        int, long long, int, cublasComputeType_t, cublasGemmAlgo_t);
++    Gemm gemm;
++    Batched batched;
++    explicit Impl(std::shared_ptr<Backend> value, CUstream stream)
++        : backend(std::move(value)), library({"libcublas.so.12", "libcublas.so.13", "cublas64_12.dll", "cublas64_13.dll"}) {
++        int major = 0;
++        backend->api.check(backend->api.cuDeviceGetAttribute(&major,
++            CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, backend->device), "check BF16 device");
++        if (major < 8) throw std::runtime_error("BF16 mixed GEMM requires an Ampere or newer GPU");
++        create = library.symbol<decltype(create)>("cublasCreate_v2");
++        destroy = library.symbol<decltype(destroy)>("cublasDestroy_v2");
++        setStream = library.symbol<decltype(setStream)>("cublasSetStream_v2");
++        setMath = library.symbol<decltype(setMath)>("cublasSetMathMode");
++        setAtomics = library.symbol<decltype(setAtomics)>("cublasSetAtomicsMode");
++        gemm = library.symbol<Gemm>("cublasGemmEx");
++        batched = library.symbol<Batched>("cublasGemmStridedBatchedEx");
++        check(create(&handle), "create");
++        try {
++            check(setStream(handle, reinterpret_cast<cudaStream_t>(stream)), "set stream");
++            check(setMath(handle, CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION), "set FP32 reduction");
++            check(setAtomics(handle, CUBLAS_ATOMICS_NOT_ALLOWED), "disable atomics");
++        } catch (...) { destroy(handle); handle = nullptr; throw; }
++    }
++    ~Impl() {
++        if (handle && backend->api.cuCtxPushCurrent(backend->context) == CUDA_SUCCESS) {
++            destroy(handle);
++            CUcontext popped;
++            backend->api.cuCtxPopCurrent(&popped);
++        }
++    }
++};
++MixedGemm::MixedGemm(std::shared_ptr<Backend> backend, CUstream stream)
++    : impl(std::make_unique<Impl>(std::move(backend), stream)) {}
++MixedGemm::~MixedGemm() = default;
++
++void MixedGemm::run(const Program &p, const Node &node, const std::vector<CUdeviceptr> &pointers) {
++    const auto &a = p.nodes[node.inputs[0]].shape, &b = p.nodes[node.inputs[1]].shape;
++    size_t m = a[a.size() - 2], k = a.back(), n = b.back();
++    auto *left = reinterpret_cast<const float *>(pointers[node.inputs[0]]);
++    auto *right = reinterpret_cast<const float *>(pointers[node.inputs[1]]);
++    const auto id = static_cast<size_t>(&node - p.nodes.data());
++    auto *output = reinterpret_cast<float *>(pointers[id]);
++    const float alpha = 1, beta = 0;
++    const auto invoke = [&](size_t rows, const float *x, const float *y, float *z) {
++        // Row-major C=A*B is column-major C^T=B^T*A^T. FAST_16BF
++        // explicitly selects BF16 operand down-conversion and FP32 accumulation.
++        check(impl->gemm(impl->handle, CUBLAS_OP_N, CUBLAS_OP_N, dimension(n), dimension(rows), dimension(k),
++            &alpha, y, CUDA_R_32F, dimension(n), x, CUDA_R_32F, dimension(k),
++            &beta, z, CUDA_R_32F, dimension(n), CUBLAS_COMPUTE_32F_FAST_16BF, CUBLAS_GEMM_DEFAULT), "GEMM");
++    };
++    if (b.size() == 2) {
++        invoke(elements(a) / k, left, right, output);
++        return;
++    }
++    const auto batches = elements(Shape(node.shape.begin(), node.shape.end() - 2));
++    if (a.size() == b.size() && std::equal(a.begin(), a.end() - 2, b.begin())) {
++        check(impl->batched(impl->handle, CUBLAS_OP_N, CUBLAS_OP_N, dimension(n), dimension(m), dimension(k),
++            &alpha, right, CUDA_R_32F, dimension(n), k * n, left, CUDA_R_32F, dimension(k), m * k,
++            &beta, output, CUDA_R_32F, dimension(n), m * n, dimension(batches),
++            CUBLAS_COMPUTE_32F_FAST_16BF, CUBLAS_GEMM_DEFAULT), "batched GEMM");
++    } else {
++        for (size_t batch = 0; batch < batches; ++batch)
++            invoke(m, left + batchOffset(batch, node.shape, a),
++                right + batchOffset(batch, node.shape, b), output + batch * m * n);
++    }
++}
++} // namespace camel::tiles::cuda_detail
++#endif
 diff --git a/test/cases/modules/autodiff/math_sqrt.cml b/test/cases/modules/autodiff/math_sqrt.cml
 new file mode 100644
 --- /dev/null
@@ -430,6 +799,68 @@ new file mode 100644
 +    let middle = bytes(read_chunk(path, 1, 6))
 +    println('binary size={} whole={} middle={}'->format<file_size(path), whole, middle>)
 +    return if file_size(path) == 8 && len(whole) == 8 && len(middle) == 6 then 0 else 1
++}
+diff --git a/test/cases/modules/tiles/batch_matmul.cml b/test/cases/modules/tiles/batch_matmul.cml
+new file mode 100644
+--- /dev/null
++++ b/test/cases/modules/tiles/batch_matmul.cml
+@@ -0,0 +1,57 @@
++module batch_matmul_checks
++import { Tensor, randn, seed, sum, mean, abs, reshape, shape, set_num_threads } from tensor
++import { value_and_grad } from autodiff
++import { run, source } from tiles
++
++type Pair = { a: Tensor<f32>, b: Tensor<f32> }
++func pair(a: Tensor<f32>, b: Tensor<f32>): Pair { return { a: a, b: b } }
++func product(a: Tensor<f32>, b: Tensor<f32>): Tensor<f32> { return a @ b }
++with <w: Pair>
++func loss(target: Tensor<f32>): float {
++    let e = w.a @ w.b - target
++    return mean(e * e)
++}
++func derivative(w: Pair, target: Tensor<f32>): (float, Pair) {
++    return value_and_grad(loss)<w>(target)
++}
++func check(name: string, a: Tensor<f32>, b: Tensor<f32>, target: Tensor<f32>, run_gpu: bool): int sync {
++    let w = pair(a, b)
++    let code = source<derivative>((w, target))
++    if len(code) == 0 then sync { exit(1) }
++    if run_gpu then sync {
++        let forward_error = sum(abs(run<product>((a, b)) - a @ b))
++        let cpu = derivative(w, target)
++        let gpu = run<derivative>((w, target))
++        let gradient_error = sum(abs(cpu.1.a - gpu.1.a)) + sum(abs(cpu.1.b - gpu.1.b))
++        let plus = pair(a + 0.001, b - 0.001)
++        let minus = pair(a - 0.001, b + 0.001)
++        let fd = (loss<plus>(target) - loss<minus>(target)) / 0.002
++        let fd_error = sum(abs(reshape([fd - sum(gpu.1.a) + sum(gpu.1.b)], [1])))
++        println('BATCH {} forward_l1={} gradient_l1={} directional_error={}'->format<name, forward_error, gradient_error, fd_error>)
++        if forward_error > 0.0001 || gradient_error > 0.0001 || fd_error > 0.002 then sync { exit(1) }
++    }
++    return 0
++}
++func main(run_gpu: bool): int sync {
++    set_num_threads(1)
++    seed(173)
++    check('equal3', randn([2, 3, 4]), randn([2, 4, 5]), randn([2, 3, 5]), run_gpu)
++    check('changed_batch', randn([3, 3, 4]), randn([3, 4, 5]), randn([3, 3, 5]), run_gpu)
++    check('equal4', randn([2, 3, 4, 5]), randn([2, 3, 5, 6]), randn([2, 3, 4, 6]), run_gpu)
++    check('rhs_matrix', randn([2, 3, 4]), randn([4, 5]), randn([2, 3, 5]), run_gpu)
++    check('lhs_matrix', randn([3, 4]), randn([2, 4, 5]), randn([2, 3, 5]), run_gpu)
++    check('broadcast4', randn([2, 1, 3, 4]), randn([1, 3, 4, 5]), randn([2, 3, 3, 5]), run_gpu)
++    check('tail_tiles', randn([2, 17, 19]), randn([2, 19, 18]), randn([2, 17, 18]), run_gpu)
++    if run_gpu then sync {
++        let a = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0], [2, 2, 3])
++        let expected = reshape([22.0, 28.0, 49.0, 64.0, 220.0, 244.0, 301.0, 334.0], [2, 2, 2])
++        let known_error = sum(abs(run<product>((a, reshape(a, [2, 3, 2]))) - expected))
++        if known_error != 0.0 then sync { exit(1) }
++        let empty_k = run<product>((randn([2, 3, 0]), randn([2, 0, 4])))
++        if sum(abs(empty_k)) != 0.0 then sync { exit(1) }
++        let empty_batch = run<product>((randn([0, 3, 4]), randn([1, 4, 5])))
++        if shape(empty_batch)[0] != 0 then sync { exit(1) }
++    }
++    println('BATCH MATMUL CHECKS PASS')
++    return 0
 +}
 diff --git a/test/cases/modules/tiles/layout_grad.cml b/test/cases/modules/tiles/layout_grad.cml
 new file mode 100644
@@ -497,73 +928,52 @@ new file mode 100644
 +    }
 +    return 0
 +}
-diff --git a/test/cases/modules/tiles/batch_matmul.cml b/test/cases/modules/tiles/batch_matmul.cml
+diff --git a/test/cases/modules/tiles/mixed_matmul.cml b/test/cases/modules/tiles/mixed_matmul.cml
 new file mode 100644
 --- /dev/null
-+++ b/test/cases/modules/tiles/batch_matmul.cml
-@@ -0,0 +1,57 @@
-+module batch_matmul_checks
-+import { Tensor, randn, seed, sum, mean, abs, reshape, shape, set_num_threads } from tensor
-+import { value_and_grad } from autodiff
-+import { run, source } from tiles
++++ b/test/cases/modules/tiles/mixed_matmul.cml
+@@ -0,0 +1,36 @@
++module mixed_checks
++import { Tensor, ones, reshape, sum, abs, randn, seed, set_num_threads } from tensor
++import { run, inspect } from tiles
 +
-+type Pair = { a: Tensor<f32>, b: Tensor<f32> }
-+func pair(a: Tensor<f32>, b: Tensor<f32>): Pair { return { a: a, b: b } }
-+func product(a: Tensor<f32>, b: Tensor<f32>): Tensor<f32> { return a @ b }
-+with <w: Pair>
-+func loss(target: Tensor<f32>): float {
-+    let e = w.a @ w.b - target
-+    return mean(e * e)
-+}
-+func derivative(w: Pair, target: Tensor<f32>): (float, Pair) {
-+    return value_and_grad(loss)<w>(target)
-+}
-+func check(name: string, a: Tensor<f32>, b: Tensor<f32>, target: Tensor<f32>, run_gpu: bool): int sync {
-+    let w = pair(a, b)
-+    let code = source<derivative>((w, target))
-+    if len(code) == 0 then sync { exit(1) }
-+    if run_gpu then sync {
-+        let forward_error = sum(abs(run<product>((a, b)) - a @ b))
-+        let cpu = derivative(w, target)
-+        let gpu = run<derivative>((w, target))
-+        let gradient_error = sum(abs(cpu.1.a - gpu.1.a)) + sum(abs(cpu.1.b - gpu.1.b))
-+        let plus = pair(a + 0.001, b - 0.001)
-+        let minus = pair(a - 0.001, b + 0.001)
-+        let fd = (loss<plus>(target) - loss<minus>(target)) / 0.002
-+        let fd_error = sum(abs(reshape([fd - sum(gpu.1.a) + sum(gpu.1.b)], [1])))
-+        println('BATCH {} forward_l1={} gradient_l1={} directional_error={}'->format<name, forward_error, gradient_error, fd_error>)
-+        if forward_error > 0.0001 || gradient_error > 0.0001 || fd_error > 0.002 then sync { exit(1) }
-+    }
-+    return 0
-+}
++@numeric(reassociate, change_precision, finite_math)
++func mixed(a: Tensor<f32>, b: Tensor<f32>): Tensor<f32> { return a @ b }
++func strict(a: Tensor<f32>, b: Tensor<f32>): Tensor<f32> { return a @ b }
++@numeric(change_precision)
++func incomplete(a: Tensor<f32>, b: Tensor<f32>): Tensor<f32> { return a @ b }
++
 +func main(run_gpu: bool): int sync {
 +    set_num_threads(1)
-+    seed(173)
-+    check('equal3', randn([2, 3, 4]), randn([2, 4, 5]), randn([2, 3, 5]), run_gpu)
-+    check('changed_batch', randn([3, 3, 4]), randn([3, 4, 5]), randn([3, 3, 5]), run_gpu)
-+    check('equal4', randn([2, 3, 4, 5]), randn([2, 3, 5, 6]), randn([2, 3, 4, 6]), run_gpu)
-+    check('rhs_matrix', randn([2, 3, 4]), randn([4, 5]), randn([2, 3, 5]), run_gpu)
-+    check('lhs_matrix', randn([3, 4]), randn([2, 4, 5]), randn([2, 3, 5]), run_gpu)
-+    check('broadcast4', randn([2, 1, 3, 4]), randn([1, 3, 4, 5]), randn([2, 3, 3, 5]), run_gpu)
-+    check('tail_tiles', randn([2, 17, 19]), randn([2, 19, 18]), randn([2, 17, 18]), run_gpu)
++    let a = ones([256, 256]) * 1.00390625
++    let eye = reshape(range(0, 65536)->map<(i: int): float => if i / 256 == i % 256 then 1.0 else 0.0>, [256, 256])
++    println(inspect<mixed>((a, eye)))
++    println(inspect<incomplete>((a, eye)))
++    println(inspect<strict>((a, eye)))
 +    if run_gpu then sync {
-+        let a = reshape([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0], [2, 2, 3])
-+        let expected = reshape([22.0, 28.0, 49.0, 64.0, 220.0, 244.0, 301.0, 334.0], [2, 2, 2])
-+        let known_error = sum(abs(run<product>((a, reshape(a, [2, 3, 2]))) - expected))
-+        if known_error != 0.0 then sync { exit(1) }
-+        let empty_k = run<product>((randn([2, 3, 0]), randn([2, 0, 4])))
-+        if sum(abs(empty_k)) != 0.0 then sync { exit(1) }
-+        let empty_batch = run<product>((randn([0, 3, 4]), randn([1, 4, 5])))
-+        if shape(empty_batch)[0] != 0 then sync { exit(1) }
++        let m = run<mixed>((a, eye))
++        let f = run<strict>((a, eye))
++        let mixed_error = sum(abs(m - 1.0))
++        let strict_error = sum(abs(f - a))
++        let difference = sum(abs(m - f))
++        println('MIXED bf16_error={} fp32_error={} precision_difference={}'->format<mixed_error, strict_error, difference>)
++        if mixed_error > 0.0001 || strict_error != 0.0 || difference < 1.0 then sync { exit(1) }
++        seed(31415)
++        let left = randn([2, 1, 3, 5])
++        let right = randn([1, 4, 5, 7])
++        let reference = strict(left, right)
++        let relative = sum(abs(run<mixed>((left, right)) - reference)) / sum(abs(reference))
++        println('MIXED broadcast_relative_error={}'->format<relative>)
++        if relative > 0.02 then sync { exit(1) }
 +    }
-+    println('BATCH MATMUL CHECKS PASS')
++    println('MIXED CHECKS PASS')
 +    return 0
 +}
 diff --git a/test/plans/feat/modules/ddpm_primitives.plan.toml b/test/plans/feat/modules/ddpm_primitives.plan.toml
 new file mode 100644
 --- /dev/null
 +++ b/test/plans/feat/modules/ddpm_primitives.plan.toml
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,56 @@
 +id = "modules.ddpm_primitives"
 +order = 375
 +tier = "feat"
@@ -613,70 +1023,10 @@ new file mode 100644
 +args = ["--arg", "run_gpu=false", "${case}", "std::macro", "${backend}"]
 +envs = ["CAMEL_TILES_DEVICE=invalid"]
 +expect_stdout_contains = ["BATCH MATMUL CHECKS PASS"]
-diff --git a/docs/technical/ddpm-primitives.md b/docs/technical/ddpm-primitives.md
-new file mode 100644
---- /dev/null
-+++ b/docs/technical/ddpm-primitives.md
-@@ -0,0 +1,62 @@
-+# DDPM experiment: missing runtime primitives
 +
-+The standalone Camel-DDPM experiment exposed missing scalar/file primitives and
-+GPU lowering needed by dense and patch-based denoisers.
-+These changes add library capabilities without changing language semantics.
-+
-+- `math:sqrt` now publishes an f32/f64 VJP in its owning module. It computes
-+  `(dy * 0.5) / y` in the result's float width; integer inputs have no tangent.
-+  The rule is intended for the differentiable domain `x > 0`; no derivative at
-+  zero or outside the real domain is promised. The normal scalar arithmetic
-+  fault/IEEE behavior remains in force there.
-+- `fs.write_text` writes the string's stored byte length, including embedded
-+  NUL. Its binary-mode contract already promised byte-preserving output;
-+  streaming `c_str()` had incorrectly truncated PGM images at the first NUL.
-+  Write/close failures now raise a file-system fault instead of reporting success.
-+- Tiles specializes `tensor:numel` to an integer attribute using the concrete
-+  invocation shape. This lets the `mean` VJP compute its denominator without
-+  treating the shape query as a device tensor. A second invocation with a
-+  different shape is specialized independently.
-+- Tiles also specializes `tensor:shape` to a host-only integer-array attribute.
-+  Reshape pullbacks consume it using the normal core layout instantiator. No
-+  synthetic array pointer survives graph extraction.
-+- `tensor:permute_inverse`, emitted by the permutation VJP, lowers to a checked
-+  inverse permutation through the core `tensor:permute` index instance. Both
-+  operator contracts remain dependencies of the generated plan. Negative axes
-+  are normalized and malformed permutations are rejected.
-+- Tiles lowers rank-2 and higher matrix products using the existing Tensor core
-+  index instance, including singleton and unequal-rank batch broadcasting. Batch
-+  coordinates are decoded from grid Y and passed through the core access maps;
-+  no alternative broadcasting convention is introduced. Ascending f32 FMA
-+  accumulation remains unchanged. Empty output batches perform no operand reads;
-+  an empty contraction stores the positive-zero initial accumulator.
-+- Matrix pullbacks compose transpose, matmul and sum-to through those same
-+  primitives. A shared rank-2 RHS uses the CPU gradient's flattened batch/row
-+  GEMM, preserving its single FMA chain rather than rounding independent batch
-+  products and adding them afterwards. Rank-1 vector products remain unsupported
-+  by Tiles. Launches exceeding the existing CUDA grid-Y limit are rejected.
-+
-+Each failure was reproduced manually before adding plan assertions. Run:
-+
-+```powershell
-+node scripts/test.js test/plans/feat/modules/ddpm_primitives.plan.toml
-+```
-+
-+The plan checks scalar gradients with runtime/macro construction on NVM/FVM/JIT,
-+embedded-NUL file round trips, and GPU-independent CUDA source generation for
-+mean/layout gradients with changing shapes. The layout case uses a non-self-inverse
-+permutation and negative axes. Batch products additionally cover changed batch
-+sizes, rank-3/4 inputs, broadcasting, shared projections and non-tile-aligned
-+dimensions. CUDA execution checks an independent integer-valued product, empty
-+cases, CPU/GPU forward and gradient agreement and directional finite differences.
-+To execute these on CUDA hardware:
-+
-+```powershell
-+camel --arg run_gpu=true test/cases/modules/tiles/mean_grad.cml std::macro std::fvm
-+camel --arg run_gpu=true test/cases/modules/tiles/layout_grad.cml std::macro std::fvm
-+camel --arg run_gpu=true test/cases/modules/tiles/batch_matmul.cml std::macro std::fvm
-+```
-+
-+The experiment's own tests additionally compare its GPU gradients and Camel Adam
-+implementation with the CPU autodiff and `nn.adam` implementations. GPU capability
-+checks use explicit Tiles `run`/`run_device`; they cannot silently fall back to CPU.
++[[tests]]
++name = "tiles.mixed_matmul.source"
++case = "../../../cases/modules/tiles/mixed_matmul.cml"
++args = ["--arg", "run_gpu=false", "${case}", "std::macro", "${backend}"]
++envs = ["CAMEL_TILES_DEVICE=invalid"]
++expect_stdout_contains = ["cublas_bf16", "MIXED CHECKS PASS"]

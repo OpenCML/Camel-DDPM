@@ -1,0 +1,104 @@
+module networks
+import { Att } from params_att
+import { FF } from params_ff
+import { Encoder } from params_encoder
+import { Denoiser } from params_denoiser
+import { AE } from params_ae
+import { LD } from params_ld
+import { Tensor, reshape, permute, transpose, exp, mean, sum } from tensor
+import { row_softmax, rms_norm } from attention
+import { patches, pixels } from text_image
+import { value_and_grad } from autodiff
+
+// Explicit lexical permission: only these GEMMs may use BF16 operands and a
+// library reduction order. Normalization, softmax, losses and Adam stay FP32.
+@numeric(reassociate, change_precision, finite_math)
+export func mm(a: Tensor<f32>, b: Tensor<f32>): Tensor<f32> { return a @ b }
+
+func silu(x: Tensor<f32>): Tensor<f32> { return x / (1.0 + exp(-x)) }
+with <p: Att, qlayout: int[], klayout: int[], output: int[]>
+func attend(x: Tensor<f32>, context: Tensor<f32>): Tensor<f32> {
+    let q = permute(reshape(mm(x, p.q), qlayout), [0, 2, 1, 3])
+    let k = permute(reshape(mm(context, p.k), klayout), [0, 2, 1, 3])
+    let v = permute(reshape(mm(context, p.v), klayout), [0, 2, 1, 3])
+    let weights = row_softmax(mm(q, transpose(k)) * 0.1767766952966369)
+    let merged = reshape(permute(mm(weights, v), [0, 2, 1, 3]), output)
+    return mm(merged, p.o)
+}
+func feed(p: FF, x: Tensor<f32>): Tensor<f32> {
+    return mm(silu(mm(x, p.up)) * mm(x, p.gate_w), p.down)
+}
+with <p: Encoder, layout: int[], output: int[]>
+func encode_block(x: Tensor<f32>): Tensor<f32> {
+    let n = rms_norm(x, 128.0) * p.n1
+    let y = x + attend<p.att, layout, layout, output>(n, n)
+    return y + feed(p.ff, rms_norm(y, 128.0) * p.n2)
+}
+with <p: Denoiser>
+func diffusion_block(x: Tensor<f32>, context: Tensor<f32>, time: Tensor<f32>): Tensor<f32> {
+    let n = rms_norm(x, 128.0) * p.n1 + mm(time, p.time_w)
+    let a = x + attend<p.att, [-1, 64, 4, 32], [-1, 64, 4, 32], [-1, 64, 128]>(n, n)
+    let c = a + attend<p.cross, [-1, 64, 4, 32], [-1, 128, 4, 32], [-1, 64, 128]>(rms_norm(a, 128.0) * p.n2, context)
+    return c + feed(p.ff, rms_norm(c, 128.0) * p.n3)
+}
+
+export func encode_image(p: AE, image: Tensor<f32>): (Tensor<f32>, Tensor<f32>) {
+    let x = mm(patches(image), p.input_w) + p.pos_e
+    let h0 = encode_block<p.encoder0, [-1, 64, 4, 32], [-1, 64, 128]>(x)
+    let h1 = encode_block<p.encoder1, [-1, 64, 4, 32], [-1, 64, 128]>(h0)
+    let raw = mm(rms_norm(h1, 128.0), p.logvar)
+    // Bound log variance smoothly, without a clipping derivative/mask.
+    let logvar = 8.0 / (1.0 + exp(-raw / 4.0)) - 4.0
+    return (mm(rms_norm(h1, 128.0), p.mu), logvar)
+}
+export func decode_image(p: AE, latent: Tensor<f32>): Tensor<f32> {
+    let x = mm(latent, p.decoder_w) + p.pos_d
+    let h0 = encode_block<p.decoder0, [-1, 64, 4, 32], [-1, 64, 128]>(x)
+    let h1 = encode_block<p.decoder1, [-1, 64, 4, 32], [-1, 64, 128]>(h0)
+    let raw = mm(rms_norm(h1, 128.0), p.output_w) + p.output_b
+    return pixels(2.0 / (1.0 + exp(-raw)) - 1.0)
+}
+with <p: AE>
+func ae_loss(image: Tensor<f32>, noise: Tensor<f32>): float {
+    let encoded = encode_image(p, image)
+    let latent = encoded.0 + exp(encoded.1 * 0.5) * noise
+    let error = decode_image(p, latent) - image
+    let kl = mean(encoded.0 * encoded.0 + exp(encoded.1) - 1.0 - encoded.1) * 0.5
+    return mean(error * error) + kl * 0.0001
+}
+export func ae_grad(p: AE, image: Tensor<f32>, noise: Tensor<f32>): (float, AE) {
+    return value_and_grad(ae_loss)<p>(image, noise)
+}
+export func image_mean(p: AE, image: Tensor<f32>): Tensor<f32> { return encode_image(p, image).0 }
+
+export func ae_eval(p: AE, image: Tensor<f32>): (float, float, float, Tensor<f32>) {
+    let z = image_mean(p, image)
+    let reconstructed = decode_image(p, z)
+    let e = reconstructed - image
+    return (mean(e * e), mean(z), mean(z * z), reconstructed)
+}
+
+export func predict_noise(p: LD, x: Tensor<f32>, text: Tensor<f32>, time: Tensor<f32>): Tensor<f32> {
+    let tokens = mm(text, p.token) + p.pos_t
+    let t0 = encode_block<p.text0, [-1, 128, 4, 32], [-1, 128, 128]>(tokens)
+    let t1 = encode_block<p.text1, [-1, 128, 4, 32], [-1, 128, 128]>(t0)
+    let context = rms_norm(t1, 128.0) * p.text_norm
+    let h = mm(x, p.image_w) + p.pos_i + mm(time, p.time_w)
+    let h0 = diffusion_block<p.block0>(h, context, time)
+    let h1 = diffusion_block<p.block1>(h0, context, time)
+    let h2 = diffusion_block<p.block2>(h1, context, time)
+    let h3 = diffusion_block<p.block3>(h2, context, time)
+    return mm(rms_norm(h3, 128.0), p.output_w) + p.output_b
+}
+with <p: LD>
+func noise_loss(x: Tensor<f32>, text: Tensor<f32>, time: Tensor<f32>, target: Tensor<f32>): float {
+    let e = predict_noise(p, x, text, time) - target
+    return mean(e * e)
+}
+export func ld_grad(p: LD, x: Tensor<f32>, text: Tensor<f32>, time: Tensor<f32>, target: Tensor<f32>): (float, LD) {
+    return value_and_grad(noise_loss)<p>(x, text, time, target)
+}
+
+export func ld_eval(p: LD, x: Tensor<f32>, text: Tensor<f32>, time: Tensor<f32>, target: Tensor<f32>): float {
+    return noise_loss<p>(x, text, time, target)
+}

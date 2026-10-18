@@ -1,0 +1,9 @@
+module optim
+import { Tensor, sqrt } from tensor
+
+// FP32 master parameters and moments. Mixed precision never changes Adam state.
+export func adam_leaf(p: Tensor<f32>, g: Tensor<f32>, m: Tensor<f32>, v: Tensor<f32>, rate: float, bc1: float, bc2: float): (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+    let nm = m * 0.9 + g * 0.1
+    let nv = v * 0.999 + g * g * 0.001
+    return (p - rate * (nm / bc1) / (sqrt(nv / bc2) + 0.00000001), nm, nv)
+}

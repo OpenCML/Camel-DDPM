@@ -1,0 +1,41 @@
+module full_model_checks
+import { initAE, zeroAE, stepAE, normAE, distanceAE } from params_ae
+import { initLD, zeroLD, stepLD, normLD, distanceLD } from params_ld
+import { ae_grad, ld_grad, image_mean, predict_noise } from networks
+import { Tensor, randn, seed, sum, abs, reshape, set_num_threads } from tensor
+import { run, inspect } from tiles
+import { write_text } from fs
+import { embedding } from ddpm
+import { sqrt } from math
+
+func main(out: string): int sync {
+    set_num_threads(1)
+    seed(307)
+    let ae = initAE()
+    let image = randn([1, 3, 64, 64]) * 0.3
+    let noise = randn([1, 64, 4])
+    write_text(out + '/ae-plan.json', inspect<ae_grad>((ae, image, noise)))
+    let ae_vg = run<ae_grad>((ae, image, noise))
+    let ae_cpu = ae_grad(ae, image, noise)
+    let ae_relative = sqrt(distanceAE(ae_cpu.1, ae_vg.1) / normAE(ae_cpu.1))
+    let zae = zeroAE(ae)
+    let ae_next = run<stepAE>((ae, ae_vg.1, zae, zae, 0.0001, 0.1, 0.001))
+    let ae_after = run<ae_grad>((ae_next.0, image, noise))
+    println('FULL AE before={} after={} relative_gradient_error={}'->format<ae_vg.0, ae_after.0, ae_relative>)
+    let ld = initLD()
+    let x = run<image_mean>((ae_next.0, image)) + noise
+    let text = randn([1, 128, 259]) * 0.1
+    let time = embedding(49) as Tensor<f32>
+    write_text(out + '/ld-plan.json', inspect<ld_grad>((ld, x, text, time, noise)))
+    let ld_vg = run<ld_grad>((ld, x, text, time, noise))
+    let ld_cpu = ld_grad(ld, x, text, time, noise)
+    let ld_relative = sqrt(distanceLD(ld_cpu.1, ld_vg.1) / normLD(ld_cpu.1))
+    let zld = zeroLD(ld)
+    let ld_next = run<stepLD>((ld, ld_vg.1, zld, zld, 0.0001, 0.1, 0.001))
+    let ld_after = run<ld_grad>((ld_next.0, x, text, time, noise))
+    println('FULL LD before={} after={} relative_gradient_error={}'->format<ld_vg.0, ld_after.0, ld_relative>)
+    let ok = ae_after.0 < ae_vg.0 && ld_after.0 < ld_vg.0 && ae_relative < 0.1 && ld_relative < 0.1
+    println(if ok then 'FULL MODEL CHECKS PASS' else 'FULL MODEL CHECKS FAIL')
+    if !ok then sync { exit(1) }
+    return 0
+}

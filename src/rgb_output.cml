@@ -1,0 +1,12 @@
+module rgb_output
+import { Tensor, reshape, permute, shape } from tensor
+import { min, max, round } from math
+import { write_text } from fs
+import { from_bytes } from str
+
+export func save_rgb(x: Tensor<f32>, path: string): void sync {
+    let count = shape(x)[0]
+    let flat = reshape(permute(x, [0, 2, 3, 1]), [-1])
+    let values = range(0, count * 12288)->map<(i: int): int => int(round((min(max(flat[i], -1.0), 1.0) + 1.0) * 127.5))>
+    write_text(path, 'P6\n64 ' + string(count * 64) + '\n255\n' + from_bytes(values))
+}

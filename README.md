@@ -2,13 +2,14 @@
 
 目标是用 Camel 从零训练通用中英文文生图模型，数据、构建与训练均放在 `ssh 88zjwei`。所有学习组件随机初始化，不使用预训练权重。完整目标、数据来源、能力缺口和验收条件见 [从零训练说明](docs/from-scratch.md)。
 
-已验证的路径包括下方的 28×28 MNIST 原型，以及支持四头注意力、批量训练和恢复的 RGB64 图文模型；后者仍用于验证底层能力，不代表生产级模型已经完成。
+新增 [完整小型潜空间模型](docs/latent-training.md)：从零初始化的 VAE、文本 Transformer、4 层条件去噪 Transformer、BF16 矩阵乘和 FP32 Adam/EMA，使用 256 张分组划分的 CC0 图片在服务器训练。结构和恢复流程已经补齐，生成质量仍未达到生产级要求。原 RGB64 和 MNIST 原型作为回归保留。
 
 **当前状态：已在远程 RTX 3090 上跑通训练和采样，背景噪点明显减少，但仍有断笔和块状接缝。** 这个仓库首先是 Camel 能力与缺口的可复现实验。
 
 ![Remote patch-x0 model after 5,000 updates](docs/results/server-patch-5000.png)
 
 最新 RGB 实验：[批量注意力与恢复验证](docs/results/server-batched-validation.md)。MNIST 实验见 [服务器验证记录](docs/results/server-patch-validation.md)。旧 MLP 基线见下方验证结果。
+最新潜空间模型：[混合精度、256 图训练与采样结果](docs/results/server-latent-validation.md)。
 
 ## 实现范围
 

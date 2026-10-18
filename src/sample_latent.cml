@@ -1,0 +1,41 @@
+module sample_latent
+import { DeviceLD, loadLD, uploadLD } from params_ld
+import { loadAE, uploadAE } from params_ae
+import { predict_noise, decode_image } from networks
+import { byte_features } from text_data
+import { Schedule, schedule, embedding } from ddpm
+import { Tensor, randn, seed, reshape, save_npy, set_num_threads } from tensor
+import { sqrt } from math
+import { run } from tiles
+import { save_rgb } from rgb_output
+
+func sample(p: DeviceLD, s: Schedule, x: Tensor<f32>, text: Tensor<f32>, empty: Tensor<f32>, index: int, steps: int, guidance: float): Tensor<f32> sync {
+    return if index < 0 then x else sync {
+        let t = (len(s.beta) - 1) * index / (steps - 1)
+        let next_t = if index == 0 then -1 else (len(s.beta) - 1) * (index - 1) / (steps - 1)
+        let time = embedding(t) as Tensor<f32>
+        let conditional = run<predict_noise>((p, x, text, time))
+        let epsilon = if guidance == 1.0 then conditional else {
+            let unconditional = run<predict_noise>((p, x, empty, time))
+            return unconditional + guidance * (conditional - unconditional)
+        }
+        let clean = (x - sqrt(1.0 - s.abar[t]) * epsilon) / sqrt(s.abar[t])
+        let next_bar = if next_t < 0 then 1.0 else s.abar[next_t]
+        let next = sqrt(next_bar) * clean + sqrt(1.0 - next_bar) * epsilon
+        return sample(p, s, next, text, empty, index - 1, steps, guidance)
+    }
+}
+func main(model: string, ae_path: string, out: string, prompt: string, sample_seed: int, timesteps: int, steps: int, guidance: float): int sync {
+    set_num_threads(1)
+    seed(sample_seed)
+    let p = uploadLD(loadLD(model))
+    let ae = uploadAE(loadAE(ae_path))
+    let text = reshape(byte_features(prompt, 128), [1, 128, 259])
+    let empty = reshape(byte_features('', 128), [1, 128, 259])
+    let latent = sample(p, schedule(timesteps), randn([1, 64, 4]), text, empty, steps - 1, steps, guidance)
+    let image = run<decode_image>((ae, latent))
+    save_npy(latent, out + '/latent.npy')
+    save_npy(image, out + '/sample.npy')
+    save_rgb(image, out + '/sample.ppm')
+    return 0
+}

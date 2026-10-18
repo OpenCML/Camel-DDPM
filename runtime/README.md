@@ -16,6 +16,11 @@ their regression cases, test plan and technical note:
 - `modules/tiles/src/matmul_kernel.cpp` and `schedule.cpp`: rank-2 and higher
   matrix products, core-defined batch broadcasting and independent batched CUDA
   tiles. Vector products remain unsupported; no precision permissions are added.
+- `schedule.cpp`, `codegen.cpp`, `cuda.cpp`, new `mixed_gemm.cpp`/header and
+  CMake targets: optional cuBLAS BF16 GEMM, selected only with explicit
+  reassociate/change_precision/finite_math grants. FP32 boundaries and state,
+  private stream-bound handle, no atomics/reduced-precision reduction, Ampere+.
+  Strict and incompletely authorized products retain the original FP32 path.
 
 Apply and build using Camel's normal build workflow, then install the collected
 distribution into this project:
@@ -37,7 +42,7 @@ have already landed upstream, do not reapply the patch; install a distribution
 with the fixes and run the numerical tests.
 
 The patch includes regression cases and the test plan
-`test/plans/feat/modules/ddpm_primitives.plan.toml` (18 NVM/FVM/JIT checks).
+`test/plans/feat/modules/ddpm_primitives.plan.toml` (21 NVM/FVM/JIT checks).
 They cover scalar sqrt gradients, an
 embedded-NUL/high-byte file round trip and CUDA source specialization of the
 mean/layout gradients with changing input shapes and negative permutation axes. The numerical square-root rule is
@@ -50,6 +55,12 @@ The batched runtime was built and verified on `88zjwei`; the workstation runtime
 has not been rebuilt. The remote project keeps its previous runtime under
 `.camel-pre-batched-92df61c/`. Build into a fresh directory with
 `CAMEL_INSTALL_ROOT` when validating an update before activation.
+
+The current BF16-enabled runtime was additionally checked against all 58 Tiles
+regressions and the 21 DDPM primitive cases. The prior batched snapshot remains
+at `.camel-pre-mixed-8e38813/`; no workstation build was run. Full-model
+FP32-reference comparisons and server results are in
+[`docs/results/server-latent-validation.md`](../docs/results/server-latent-validation.md).
 
 No patched binaries or source checkout are needed after installation: `.camel/`
 is a complete independent runtime snapshot. The installation manifest records

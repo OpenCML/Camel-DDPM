@@ -9,6 +9,12 @@
 
 ## Architecture direction
 
+**Current implementation:** the complete small latent stack, explicit BF16 path,
+256-image sealed corpus and server commands are described in
+[latent-training.md](latent-training.md). The following RGB fixture description
+and capability table document the earlier integration stage; they are not the
+current implementation inventory. Neither stage establishes production quality.
+
 Use a jointly trained byte-level text Transformer and a conditional diffusion Transformer. A graph-visible attention implementation fits Camel's existing matrix primitives and avoids making GPU convolution a dependency of the first RGB integration test. UTF-8 bytes cover both languages without importing a pretrained tokenizer. The 64-byte fixture is **not** the eventual context budget: it truncates Chinese much earlier than English.
 
 The scalable target is latent diffusion, with an autoencoder trained first on the selected image corpus. Train its encoder, decoder and any discriminator from random initialization. Pretrained VGG/LPIPS perceptual losses would violate this project's training constraint. A direct pixel model can validate conditional denoising before that autoencoder is ready; it does not require an image encoder at all.
