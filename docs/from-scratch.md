@@ -4,7 +4,7 @@
 
 - General Chinese/English text-to-image; MNIST is a regression suite only.
 - Initialize **every learned component randomly**: tokenizer statistics (if any), text encoder, image autoencoder, denoiser and any training discriminator. Do not load CLIP, T5, VAE, diffusion, captioning or perceptual-loss weights. Do not train in PyTorch behind a Camel entry point.
-- Run downloads, builds, numerical checks and training on `88zjwei`. The workstation is for editing and transport only. Use the project-local `.camel` distribution, explicit CUDA, one host tensor thread, and an unoccupied GPU. Other server users' allocations are not available capacity.
+- Run data processing, builds, numerical checks and training on `88zjwei`. The user also permits workstation downloads followed by transfer; keep decompression, filtering and training on the server. Use the project-local `.camel` distribution, explicit CUDA and one host tensor thread. Four idle GPUs (physical 1, 2, 6, 7) are authorized for the next training stage; existing allocations remain unavailable.
 - Label correctness fixtures and early checkpoints honestly. No current checkpoint is production ready.
 
 ## Architecture direction
@@ -12,8 +12,9 @@
 **Current implementation:** the complete small latent stack, explicit BF16 path,
 256-image sealed corpus and server commands are described in
 [latent-training.md](latent-training.md). The following RGB fixture description
-and capability table document the earlier integration stage; they are not the
-current implementation inventory. Neither stage establishes production quality.
+documents the earlier integration stage. The capability table below records
+remaining gates. Neither stage establishes production quality. See the
+[production training plan](production-training.md) for the four-GPU/data scale target.
 
 Use a jointly trained byte-level text Transformer and a conditional diffusion Transformer. A graph-visible attention implementation fits Camel's existing matrix primitives and avoids making GPU convolution a dependency of the first RGB integration test. UTF-8 bytes cover both languages without importing a pretrained tokenizer. The 64-byte fixture is **not** the eventual context budget: it truncates Chinese much earlier than English.
 
@@ -61,12 +62,12 @@ The batched model is versioned `rgb64-joint-v2`. Source/runtime identity checks 
 |---|---|---|
 | Native attention | Stable large finite logits, CPU/GPU gradients, independent directional finite differences | Batched multi-head self/cross-attention and RMSNorm pass; batch isolation error zero |
 | Native RGB/text integration | Real image decode, UTF-8 byte ids, GPU forward/backward, joint text gradients, weight reload | Passes on real RGB data |
-| Dataset readiness | Diverse train/held-out corpus, language counts, caption inspection, license/provenance ledger, grouped duplicates, immutable shard hashes | Bounded museum pilot only |
+| Dataset readiness | Diverse train/held-out corpus, language counts, caption inspection, license/provenance ledger, grouped duplicates, immutable shard hashes | 256-image grouped museum pilot; WIT bilingual metadata candidates indexed, no WIT images admitted yet |
 | Scalable kernels | Batched multi-head attention, embedding gather/scatter VJP, efficient matmul, documented precision contracts | Rank ≥2 batched matmul/pullbacks and multi-head attention implemented; gather/scatter and high-throughput kernels still missing |
-| Memory and throughput | Mixed precision with explicit numeric permissions, activation recomputation, accumulation, measured peak memory/step time | Missing; no scaling claim |
+| Memory and throughput | Mixed precision with explicit numeric permissions, activation recomputation, accumulation, measured peak memory/step time | Explicit BF16 GEMM implemented with FP32 state/storage; recomputation, accumulation and four-GPU execution remain missing |
 | Recoverable training | Atomic versioned model/Adam/EMA/step/RNG/data-cursor checkpoint; interrupted vs uninterrupted trajectory comparison | RGB fixture passes process restart and mid-segment interruption; MNIST entry point remains model-only |
-| Full learned stack | Random-initialized autoencoder/text encoder/denoiser trained and validated at target resolution | Not trained |
-| Conditional sampling | Independent checkpoint load, prompt encoder, classifier-free training/guidance, DDPM and faster sampler checks | RGB DDPM/CFG and repeated sampling pass; faster samplers missing |
+| Full learned stack | Random-initialized autoencoder/text encoder/denoiser trained and validated at target resolution | Small RGB64 latent stack trained 500 steps per stage; not validated for production |
+| Conditional sampling | Independent checkpoint load, prompt encoder, classifier-free training/guidance, DDPM and faster sampler checks | RGB DDPM and latent DDIM/CFG reload/replay checks pass; images remain poor |
 | Evaluation | Fixed Chinese/English prompts, prompt swap tests, held-out denoising, diversity, memorization checks, human review | Not established; prompt sensitivity alone is insufficient |
 | Serving | Versioned config/tokenization/weights, deterministic seed handling, bounded requests, health checks, concurrency and latency/load tests | Missing |
 

@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "status": "candidate_metadata_only",
+  "scanned_rows": 370373,
+  "candidate_pairs_by_language": {
+    "en": 27152,
+    "zh": 3220
+  },
+  "candidate_unique_image_urls": 30216,
+  "downloaded_images": 0,
+  "training_admitted_images": 0,
+  "sources": [
+    {
+      "path": "/mnt/data3/zjwei/Camel-DDPM-data/wit/metadata/wit_v1.train.all-1percent_sample.tsv.gz",
+      "sha256": "945de23c2370f7233a3d167a24f87870d01d239f596b4edfbb2bed81c940dc6c"
+    }
+  ],
+  "candidates_sha256": "874207deabe41d588f1a531bd52baa917f5f24951e25333491edc044453bdc0d",
+  "required_next_gates": [
+    "individual image license and attribution",
+    "image download and decode",
+    "caption quality and diversity",
+    "exact/perceptual duplicate grouping",
+    "immutable train/evaluation shards"
+  ]
+}
