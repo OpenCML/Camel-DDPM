@@ -1,0 +1,43 @@
+module checks
+import { Model, init, schedule, embedding, q_sample, reverse_mean, loss, load_model } from ddpm
+import { Tensor, seed, randn, reshape, sum, mean } from tensor
+import { value_and_grad } from autodiff
+import { save_params, adam, adam_state } from nn
+import { abs } from math
+import { get_env } from sys
+
+func shift(m: Model, delta: float): Model {
+    return { w1: m.w1, wt: m.wt, b1: m.b1, w2: m.w2, b2: m.b2, w3: m.w3, b3: m.b3 + delta }
+}
+
+func main(): int sync {
+    seed(91)
+    let s = schedule(100)
+    let m = init(8)
+    let x = randn([2, 784])
+    let noise = randn([2, 784])
+    let e = embedding(40)
+    let a = s.abar[40]
+    let vg = value_and_grad(loss)<m>(x, noise, e, a)
+    let fd = (loss<shift(m, 0.001)>(x, noise, e, a) - loss<shift(m, -0.001)>(x, noise, e, a)) / 0.002
+    let analytical = sum(vg.1.b3)
+    let next = adam(m, vg.1, adam_state(m), 0.001)
+    let after = loss<next.0>(x, noise, e, a)
+    let dir = get_env('DDPM_OUT') + '/checks'
+    save_params(next.0, dir)
+    let reloaded = loss<load_model(dir)>(x, noise, e, a)
+    let clean = reshape([1.0, -1.0], [1, 2])
+    let eta = reshape([0.5, -0.5], [1, 2])
+    let q = q_sample(clean, eta, 0.36)
+    let q_error = sum((q - clean) * (q - clean))
+    // At t=0, with zero epsilon and x=+/-2, the clipped posterior is +/-1.
+    let last = reverse_mean(clean * 2.0, clean * 0.0, 0.1, 0.9, 1.0)
+    let last_error = sum((last - clean) * (last - clean))
+    println('CHECK gradient finite_difference={} autodiff={} abs_error={}'->format<fd, analytical, abs(fd - analytical)>)
+    println('CHECK Adam before={} after={} reload={}'->format<vg.0, after, reloaded>)
+    println('CHECK diffusion forward_error={} terminal_error={} terminal_abar={}'->format<q_error, last_error, s.abar[99]>)
+    let ok = abs(fd - analytical) < 0.0001 && after < vg.0 && reloaded == after && q_error < 0.000001 && last_error < 0.000001 && s.abar[99] < 0.000001
+    println(if ok then 'CHECKS PASS' else 'CHECKS FAIL')
+    if !ok then sync { exit(1) }
+    return 0
+}

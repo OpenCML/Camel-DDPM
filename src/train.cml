@@ -1,0 +1,61 @@
+module train
+
+import { Model, Schedule, init, schedule, embedding, loss, q_sample } from ddpm
+import { Tensor, seed, randn, load_npy, save_npy, slice, shape, set_num_threads, gemm_backend } from tensor
+import { OptimizerState, adam, adam_state, save_params } from nn
+import { value_and_grad } from autodiff
+import { randint, seed as random_seed } from random
+import { get_env } from sys
+import { image_count, batch as read_batch, save_grid } from mnist
+import { write_text } from fs
+import { sqrt } from math
+
+// All evaluation calls reuse exactly the same held-out data, noise and time points.
+func evaluate(m: Model, clean: Tensor, noise: Tensor, s: Schedule, i: int, total: float): float {
+    return if i == 5 then total / 5.0 else {
+        let t = (len(s.beta) - 1) * (2 * i + 1) / 10
+        return evaluate(m, clean, noise, s, i + 1, total + loss<m>(q_sample(clean, noise, s.abar[t]), noise, embedding(t), sqrt(1.0 - s.abar[t])))
+    }
+}
+
+func train_loop(m: Model, st: OptimizerState, count: int, s: Schedule, i: int, steps: int, batch: int, rate: float, report: int): Model sync {
+    return if i == steps then m else sync {
+        let offset = randint(0, count / batch - 1) * batch
+        let clean = read_batch('data/train-images-idx3-ubyte', offset, batch)
+        let t = randint(0, len(s.beta) - 1)
+        let noise = randn([batch, 784])
+        let noisy = q_sample(clean, noise, s.abar[t])
+        let vg = value_and_grad(loss)<m>(noisy, noise, embedding(t), sqrt(1.0 - s.abar[t]))
+        let next = adam(m, vg.1, st, rate)
+        if i % report == 0 || i + 1 == steps then sync {
+            println('TRAIN step={} loss={} t={}'->format<i + 1, vg.0, t>)
+        }
+        return train_loop(next.0, next.1, count, s, i + 1, steps, batch, rate, report)
+    }
+}
+
+func main(steps: int, batch: int, width: int, timesteps: int, report: int, threads: int, rate: float): int sync {
+    set_num_threads(threads)
+    seed(20261018)
+    random_seed(20261018)
+    let count = image_count('data/train-images-idx3-ubyte')
+    if count < batch || image_count('data/t10k-images-idx3-ubyte') < 128 then sync {
+        println('Invalid MNIST IDX files or batch size')
+        exit(1)
+    }
+    let valid = read_batch('data/t10k-images-idx3-ubyte', 0, 128)
+    save_grid(valid, get_env('DDPM_OUT') + '/validation.pgm')
+    let s = schedule(timesteps)
+    let m = init(width)
+    let fixed_noise = randn([shape(valid)[0], 784])
+    let before = evaluate(m, valid, fixed_noise, s, 0, 0.0)
+    println('CONFIG backend={} steps={} batch={} width={} timesteps={}'->format<gemm_backend(), steps, batch, width, timesteps>)
+    println('VALID before={}'->format<before>)
+    let trained = train_loop(m, adam_state(m), count, s, 0, steps, batch, rate, report)
+    let after = evaluate(trained, valid, fixed_noise, s, 0, 0.0)
+    println('VALID after={} ratio={}'->format<after, after / before>)
+    save_params(trained, get_env('DDPM_OUT') + '/checkpoint')
+    save_npy(fixed_noise, get_env('DDPM_OUT') + '/validation_noise.npy')
+    write_text(get_env('DDPM_OUT') + '/metrics.json', '{"before":' + string(before) + ',"after":' + string(after) + ',"ratio":' + string(after / before) + '}\n')
+    return 0
+}

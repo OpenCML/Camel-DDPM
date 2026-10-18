@@ -1,0 +1,21 @@
+module gpu_probe
+import { Model, init, loss, embedding } from ddpm
+import { Tensor, seed, randn } from tensor
+import { value_and_grad } from autodiff
+import { available, device, run, source } from tiles
+
+func differentiate(m: Model, x: Tensor, noise: Tensor, time: Tensor, noise_scale: float): (float, Model) {
+    return value_and_grad(loss)<m>(x, noise, time, noise_scale)
+}
+
+func main(): int sync {
+    println(available())
+    println(device())
+    seed(3)
+    let m = init(8)
+    let x = randn([2, 784])
+    let eta = randn([2, 784])
+    let result = run<differentiate>((m, x, eta, embedding(40), 0.5))
+    println('GPU loss={}'->format<result.0>)
+    return 0
+}

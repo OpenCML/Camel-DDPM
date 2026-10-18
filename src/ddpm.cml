@@ -1,0 +1,78 @@
+module ddpm
+
+import { Tensor, randn, zeros, reshape, mean, exp as tensor_exp, minimum, maximum, load_npy } from tensor
+import { sqrt, cos, sin, exp, log, min } from math
+
+export type Model = { w1: Tensor<f32>, wt: Tensor<f32>, b1: Tensor<f32>, w2: Tensor<f32>, b2: Tensor<f32>, w3: Tensor<f32>, b3: Tensor<f32> }
+export type Schedule = { beta: float[], abar: float[] }
+
+// The clipped cosine schedule is accumulated, including the clipped final beta.
+func cosine_bar(t: int, steps: int): float {
+    let v = cos((float(t) / float(steps) + 0.008) / 1.008 * 1.5707963267948966)
+    return v * v
+}
+
+func schedule_build(i: int, steps: int, cumulative: float, betas: float[], bars: float[]): Schedule {
+    return if i == steps then { beta: betas, abar: bars } else {
+        let b = min(1.0 - cosine_bar(i + 1, steps) / cosine_bar(i, steps), 0.999)
+        let a = cumulative * (1.0 - b)
+        return schedule_build(i + 1, steps, a, betas->append<b>, bars->append<a>)
+    }
+}
+
+export func schedule(steps: int): Schedule {
+    let b = min(1.0 - cosine_bar(1, steps) / cosine_bar(0, steps), 0.999)
+    return schedule_build(1, steps, 1.0 - b, [b], [1.0 - b])
+}
+
+// Eight sine/cosine pairs. Time is an ordinary data input, weights are context.
+export func embedding(t: int): Tensor {
+    let values = range(0, 16)->map<(i: int): float => {
+        let phase = float(t) * exp(-log(10000.0) * float(i / 2) / 7.0)
+        return if i % 2 == 0 then sin(phase) else cos(phase)
+    }>
+    return reshape(values, [1, 16])
+}
+
+export func init(width: int): Model sync {
+    return {
+        w1: randn([784, width], 0.0, sqrt(2.0 / 784.0)),
+        wt: randn([16, width], 0.0, 0.1), b1: zeros([width]),
+        w2: randn([width, width], 0.0, sqrt(2.0 / float(width))), b2: zeros([width]),
+        w3: randn([width, 784], 0.0, 0.01), b3: zeros([784])
+    }
+}
+
+with <m: Model>
+export func predict(x: Tensor, time: Tensor, noise_scale: float): Tensor {
+    let z1 = x @ m.w1 + time @ m.wt + m.b1
+    let h1 = z1 / (1.0 + tensor_exp(-z1))
+    let z2 = h1 @ m.w2 + m.b2
+    let h2 = z2 / (1.0 + tensor_exp(-z2))
+    // An analytic skip carries full-rank noise; the narrow MLP learns a residual.
+    return noise_scale * x + h2 @ m.w3 + m.b3
+}
+
+with <m: Model>
+export func loss(noisy: Tensor, noise: Tensor, time: Tensor, noise_scale: float): float {
+    let error = predict<m>(noisy, time, noise_scale) - noise
+    return mean(error * error)
+}
+
+export func q_sample(clean: Tensor, noise: Tensor, abar: float): Tensor {
+    return sqrt(abar) * clean + sqrt(1.0 - abar) * noise
+}
+
+// DDPM fixed-small posterior, using a clipped prediction of x_0.
+export func reverse_mean(x: Tensor, epsilon: Tensor, beta: float, abar: float, previous: float): Tensor {
+    let x0 = minimum(maximum((x - sqrt(1.0 - abar) * epsilon) / sqrt(abar), -1.0), 1.0)
+    let c1 = beta * sqrt(previous) / (1.0 - abar)
+    let c2 = (1.0 - previous) * sqrt(1.0 - beta) / (1.0 - abar)
+    return c1 * x0 + c2 * x
+}
+
+export func load_model(dir: string): Model sync {
+    return { w1: load_npy(dir + '/w1.npy') as Tensor<f32>, wt: load_npy(dir + '/wt.npy') as Tensor<f32>, b1: load_npy(dir + '/b1.npy') as Tensor<f32>,
+        w2: load_npy(dir + '/w2.npy') as Tensor<f32>, b2: load_npy(dir + '/b2.npy') as Tensor<f32>,
+        w3: load_npy(dir + '/w3.npy') as Tensor<f32>, b3: load_npy(dir + '/b3.npy') as Tensor<f32> }
+}

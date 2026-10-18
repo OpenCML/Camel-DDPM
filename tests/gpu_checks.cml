@@ -1,0 +1,35 @@
+module gpu_checks
+import { Model, init, embedding } from ddpm
+import { differentiate, update, zero_model } from gpu
+import { Tensor, seed, randn, sum, abs, set_num_threads } from tensor
+import { run, device } from tiles
+import { adam, adam_state } from nn
+
+func error(a: Model, b: Model): float {
+    return sum(abs(a.w1 - b.w1)) + sum(abs(a.wt - b.wt)) + sum(abs(a.b1 - b.b1)) + sum(abs(a.w2 - b.w2)) + sum(abs(a.b2 - b.b2)) + sum(abs(a.w3 - b.w3)) + sum(abs(a.b3 - b.b3))
+}
+
+func main(): int sync {
+    set_num_threads(1)
+    println(device())
+    seed(123)
+    let m = init(8)
+    let x = randn([2, 784])
+    let eta = randn([2, 784])
+    let e = embedding(40)
+    let cpu = differentiate(m, x, eta, e, 0.5)
+    let gpu = run<differentiate>((m, x, eta, e, 0.5))
+    let gradient_error = error(cpu.1, gpu.1)
+    let zero = zero_model(m)
+    let expected = adam(m, cpu.1, adam_state(m), 0.001)
+    let actual = run<update>((m, gpu.1, zero, zero, 0.001, 0.1, 0.001))
+    let optimizer_error = error(expected.0, actual.0)
+    let changed_cpu = differentiate(actual.0, x + 0.1, eta, e, 0.5)
+    let changed_gpu = run<differentiate>((actual.0, x + 0.1, eta, e, 0.5))
+    let changed_error = error(changed_cpu.1, changed_gpu.1)
+    println('GPU CHECK gradient_l1={} Adam_l1={} changed_input_l1={}'->format<gradient_error, optimizer_error, changed_error>)
+    let ok = gradient_error < 0.0001 && optimizer_error < 0.001 && changed_error < 0.0001
+    println(if ok then 'GPU CHECKS PASS' else 'GPU CHECKS FAIL')
+    if !ok then sync { exit(1) }
+    return 0
+}

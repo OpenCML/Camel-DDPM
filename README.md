@@ -1,0 +1,93 @@
+# Camel-DDPM
+
+用 Camel 实现 28×28 MNIST DDPM，验证数据读取、训练、自动微分、GPU 更新、权重保存与反向采样的完整流程。
+
+**当前状态：流程已跑通，生成质量尚未达标。** 小型 MLP 已学到部分笔画，但样本仍有大量噪点。这个仓库首先是 Camel 能力与缺口的可复现实验。
+
+![GPU baseline after 5,000 updates](docs/results/gpu-baseline.png)
+
+## 实现范围
+
+- Camel 原生解析 MNIST IDX，归一化到 `[-1, 1]`。
+- 100 步 cosine 噪声调度、16 维正弦时间编码、两层 SiLU MLP。
+- epsilon 预测与均方误差；带解析噪声直连的残差参数化。
+- Camel 自动微分；GPU 路径用 Camel 表达 Adam，并编译为 CUDA。
+- 权重、梯度及 Adam 的两个动量树在 GPU 更新间保留在显存。
+- NPY 权重、独立进程重载、fixed-small DDPM 后验与裁剪的 x0 预测。
+- Camel 直接输出 PGM 样本网格和采样过程；Python 仅提供可选 PNG 转换。
+
+GPU 路径显式调用 `tiles.run` / `tiles.run_device`，失败会报错，不会自动退回 CPU。
+CPU 仍负责 IDX 读取、随机噪声、时间/调度系数、少量加噪与后验运算、图片编码和文件输出。
+
+## 初始化独立运行环境
+
+需要 Windows PowerShell 和包含 Tiles 的完整 Camel 分发目录。CUDA 执行还需要 NVIDIA 驱动及匹配的 NVRTC 运行库；仅 GPU 检测成功并不保证每张图可编译。
+
+目前实验依赖三项 Camel 库修复，见 [runtime/README.md](runtime/README.md)。可用修复后的分发目录安装一次：
+
+```powershell
+.\tools\install-runtime.ps1 -Distribution D:\path\to\camel-distribution
+```
+
+脚本将完整分发安装到本项目 `.camel/`，记录版本与二进制 SHA-256。之后所有运行默认使用 `.camel/bin/camel.exe`，不链接开发目录。运行时、MNIST 和训练产物均不进入 Git。显式更新时加 `-Update`；更新前应结束正在运行的 Camel 进程。
+
+## 运行
+
+```powershell
+# 下载并校验原始 MNIST，然后用宿主 gzip 解压；IDX 解码在 Camel 中完成。
+.\tools\prepare.ps1
+
+# 先做短跑；默认 GPU，不可用时直接报错。
+.\run.ps1 -Steps 3 -Width 16 -Batch 4 -Samples 8 -SkipPrepare
+
+# 已验证的基线配置；约 158 秒是本机一次测量，不是性能保证。
+.\run.ps1 -Steps 5000 -Width 512 -Out runs\gpu-baseline -SkipPrepare
+
+# 独立重载 checkpoint 再采样；读取该次运行的 timesteps/device 配置。
+.\run.ps1 -SampleOnly -Out runs\gpu-baseline -Samples 64 -SampleSeed 12345
+
+# 数值检查；不重新训练。
+.\test.ps1
+```
+
+默认每次 GPU 更新后暂停 10 毫秒、CPU 张量线程数为 1，并降低启动进程优先级。
+`-DelayMs` 可增加暂停时间；Ctrl+C 可终止。默认不自动启动长期任务。CPU 路径需显式指定 `-Device cpu`，该路径默认也只有一个张量线程。
+
+每次运行写入 `runs/<name>/`：`config.json`、日志、`metrics.json`、`timing.json`、`checkpoint/*.npy`、`samples.npy`、`samples.pgm` 和 `trajectory_*.pgm`。当前只保存模型权重，不支持恢复 Adam 状态继续训练。短跑只能验证流程，不代表模型收敛。
+
+PNG 预览是可选步骤，无需它也能训练、采样和输出图片：
+
+```powershell
+python -m pip install -r requirements.txt
+python tools\preview.py runs\gpu-baseline
+```
+
+## 验证结果
+
+2026-10-18，RTX 4060 Ti，512 隐藏宽度、batch 32、5,000 次更新、100 步扩散：
+
+| 检查 | 结果 |
+|---|---|
+| 固定 128 张测试图、5 个时间点的噪声 MSE | 0.521963 → 0.371084，下降 28.9% |
+| 模型方向导数与中心差分绝对误差 | 2.55e-6 |
+| CPU/GPU 全部参数梯度 L1 差异 | 1.31e-7 |
+| Camel GPU Adam 与 `nn.adam` 首步参数 L1 差异 | 9.80e-7 |
+| 改变输入与参数后的 CPU/GPU 梯度 L1 差异 | 1.38e-7 |
+| 保存重载后的损失 | 完全一致 |
+| 相同权重/种子重启采样 | NPY SHA-256 完全一致 |
+| 人工检查样本 | 有笔画，噪点多；生成质量未通过 |
+
+验证时间点是按索引取的 9、29、49、69、89（总步数 100），固定噪声复用。
+数据来自官方 MNIST train/test 图片文件；无需标签，因为模型无条件生成。
+所有样本共享一次抽取的 batch 时间步，其边际训练目标仍为均匀时间步 epsilon MSE。
+随机训练损失随时间点大幅变化，不能把单个 batch 的高低当作收敛结论。
+
+## 发现的缺口与下一步
+
+已补齐：标量 `math.sqrt` 反向规则、含 NUL 的二进制文件写入、Tiles 对均值反向图 `numel` 的形状特化。实验没有改变 Camel 的语言语义。
+
+当前瓶颈是小型全连接网络的生成质量；下一步应验证卷积去噪器或小型 U-Net。
+Tiles 当前公开支持子集还不含完整卷积/池化前后向，不能直接将 CPU CNN 示例当作可用 GPU U-Net。
+另外还缺 checkpoint 中的优化器状态、恢复训练、较全面的验证集评估，以及 GPU 随机数/数据输入链路。
+
+DDPM 的原始后验与 epsilon 参数化参考 [作者实现](https://github.com/hojonathanho/diffusion/blob/master/diffusion_tf/diffusion_utils_2.py)。这里采用小模型及 cosine 调度，目标是运行链路验证，不是复现原论文质量。

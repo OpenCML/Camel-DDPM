@@ -1,0 +1,44 @@
+module mnist
+
+import { read_chunk, file_size, write_text } from fs
+import { bytes, from_bytes } from str
+import { Tensor, reshape, shape } from tensor
+import { min, max, round } from math
+
+func big_endian(b: int[], i: int): int { return b[i] * 16777216 + b[i + 1] * 65536 + b[i + 2] * 256 + b[i + 3] }
+
+export func image_count(path: string): int sync {
+    let header = bytes(read_chunk(path, 0, 16))
+    return if len(header) != 16 then 0 else {
+        let n = big_endian(header, 4)
+        return if big_endian(header, 0) == 2051 && big_endian(header, 8) == 28 && big_endian(header, 12) == 28 && file_size(path) == 16 + n * 784 then n else 0
+    }
+}
+
+// Binary I/O and TensorLike conversion avoid a Python/NumPy data pipeline.
+export func batch(path: string, offset: int, count: int): Tensor sync {
+    let pixels = bytes(read_chunk(path, 16 + offset * 784, count * 784))
+    return reshape(pixels, [count, 784]) / 127.5 - 1.0
+}
+
+// Portable graymap (P5), viewable by standard image tools. Grid encoding is Camel.
+export func save_grid(images: Tensor, path: string): void sync {
+    let n = shape(images)[0]
+    let cols = min(n, 8)
+    let rows = (n + cols - 1) / cols
+    let width = cols * 30 + 2
+    let height = rows * 30 + 2
+    let flat = reshape(images, [n * 784])
+    let pixels = range(0, width * height)->map<(p: int): int => {
+        let y = p / width
+        let x = p % width
+        let row = (y - 2) / 30
+        let col = (x - 2) / 30
+        let iy = (y - 2) % 30
+        let ix = (x - 2) % 30
+        let index = row * cols + col
+        return if y < 2 || x < 2 || row >= rows || col >= cols || iy >= 28 || ix >= 28 || index >= n then 0
+            else int(round((min(max(flat[index * 784 + iy * 28 + ix], -1.0), 1.0) + 1.0) * 127.5))
+    }>
+    write_text(path, 'P5\n' + string(width) + ' ' + string(height) + '\n255\n' + from_bytes(pixels))
+}

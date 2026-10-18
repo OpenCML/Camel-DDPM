@@ -1,0 +1,50 @@
+module gpu
+import { Model, loss, predict } from ddpm
+import { Tensor, sqrt } from tensor
+import { value_and_grad } from autodiff
+import { Device, upload, download } from tiles
+
+export type DeviceModel = { w1: Device<Tensor<f32>>, wt: Device<Tensor<f32>>, b1: Device<Tensor<f32>>, w2: Device<Tensor<f32>>, b2: Device<Tensor<f32>>, w3: Device<Tensor<f32>>, b3: Device<Tensor<f32>> }
+
+export func upload_model(m: Model): DeviceModel sync {
+    return { w1: upload(m.w1), wt: upload(m.wt), b1: upload(m.b1), w2: upload(m.w2), b2: upload(m.b2), w3: upload(m.w3), b3: upload(m.b3) }
+}
+
+export func download_model(m: DeviceModel): Model sync {
+    return { w1: download(m.w1), wt: download(m.wt), b1: download(m.b1), w2: download(m.w2), b2: download(m.b2), w3: download(m.w3), b3: download(m.b3) }
+}
+
+export func differentiate(m: Model, x: Tensor, noise: Tensor, time: Tensor, noise_scale: float): (float, Model) {
+    return value_and_grad(loss)<m>(x, noise, time, noise_scale)
+}
+
+export func forward(m: Model, x: Tensor, time: Tensor, noise_scale: float): Tensor {
+    return predict<m>(x, time, noise_scale)
+}
+
+// Functional Adam expressed in Camel so the optimizer, too, compiles to CUDA.
+func leaf(p: Tensor<f32>, g: Tensor<f32>, m: Tensor<f32>, v: Tensor<f32>, rate: float, bc1: float, bc2: float): (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+    let nm = m * 0.9 + g * 0.1
+    let nv = v * 0.999 + g * g * 0.001
+    let updated = p - rate * (nm / bc1) / (sqrt(nv / bc2) + 0.00000001)
+    return (updated, nm, nv)
+}
+
+export func update(p: Model, g: Model, m: Model, v: Model, rate: float, bc1: float, bc2: float): (Model, Model, Model) {
+    let a = leaf(p.w1, g.w1, m.w1, v.w1, rate, bc1, bc2)
+    let b = leaf(p.wt, g.wt, m.wt, v.wt, rate, bc1, bc2)
+    let c = leaf(p.b1, g.b1, m.b1, v.b1, rate, bc1, bc2)
+    let d = leaf(p.w2, g.w2, m.w2, v.w2, rate, bc1, bc2)
+    let e = leaf(p.b2, g.b2, m.b2, v.b2, rate, bc1, bc2)
+    let f = leaf(p.w3, g.w3, m.w3, v.w3, rate, bc1, bc2)
+    let h = leaf(p.b3, g.b3, m.b3, v.b3, rate, bc1, bc2)
+    return (
+        { w1: a.0, wt: b.0, b1: c.0, w2: d.0, b2: e.0, w3: f.0, b3: h.0 },
+        { w1: a.1, wt: b.1, b1: c.1, w2: d.1, b2: e.1, w3: f.1, b3: h.1 },
+        { w1: a.2, wt: b.2, b1: c.2, w2: d.2, b2: e.2, w3: f.2, b3: h.2 }
+    )
+}
+
+export func zero_model(m: Model): Model {
+    return { w1: m.w1 * 0.0, wt: m.wt * 0.0, b1: m.b1 * 0.0, w2: m.w2 * 0.0, b2: m.b2 * 0.0, w3: m.w3 * 0.0, b3: m.b3 * 0.0 }
+}
