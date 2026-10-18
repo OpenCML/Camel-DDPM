@@ -20,5 +20,8 @@ export CAMEL_PACKAGES="$PROJECT_ROOT/src"
 export CAMEL_TILES_DEVICE="$GPU"
 export DDPM_OUT="$OUT"
 export LD_LIBRARY_PATH="$CAMEL_HOME/libs:${CUDA_PATH:-/usr/local/cuda}/lib64:${LD_LIBRARY_PATH:-}"
+if [[ -f "$CAMEL_HOME/libs/libstdc++.so.6" && -f "$CAMEL_HOME/libs/libgcc_s.so.1" ]]; then
+    export LD_PRELOAD="$CAMEL_HOME/libs/libstdc++.so.6:$CAMEL_HOME/libs/libgcc_s.so.1${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
 "$CAMEL_HOME/bin/camel" --arg "timesteps=$TIMESTEPS" --arg "samples=$SAMPLES" --arg "sample_seed=$SAMPLE_SEED" --arg threads=1 --arg "model_kind=$MODEL" src/sample_gpu.cml std::macro std::fvm 2>&1 | tee "$OUT/resample.log"
 sha256sum "$OUT/samples.npy" | tee "$OUT/resample.sha256"

@@ -29,6 +29,12 @@ embedding because the model/data path is native Camel. It copies the toolchain's
 required C++ runtime libraries into `.camel/libs/`. It refuses to overwrite an
 existing project installation.
 
+The Linux launchers explicitly preload the bundled C++/GCC runtime libraries
+when present. The conda compiler embeds an absolute `DT_RPATH` that can take
+precedence over `LD_LIBRARY_PATH`; preloading prevents it from selecting the
+build environment's C++ runtime instead of the installed copies. CUDA driver and
+NVRTC remain system dependencies. No installed executable is patched in place.
+
 ## Checks and short run
 
 ```bash
