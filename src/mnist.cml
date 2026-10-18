@@ -1,7 +1,7 @@
 module mnist
 
-import { read_chunk, file_size, write_text } from fs
-import { bytes, from_bytes } from str
+import { read_chunk, file_size, write_bytes } from fs
+import { to_array as bytes, from_array, concat, encode } from bytes
 import { Tensor, reshape, shape } from tensor
 import { min, max, round } from math
 
@@ -40,5 +40,5 @@ export func save_grid(images: Tensor, path: string): void sync {
         return if y < 2 || x < 2 || row >= rows || col >= cols || iy >= 28 || ix >= 28 || index >= n then 0
             else int(round((min(max(flat[index * 784 + iy * 28 + ix], -1.0), 1.0) + 1.0) * 127.5))
     }>
-    write_text(path, 'P5\n' + string(width) + ' ' + string(height) + '\n255\n' + from_bytes(pixels))
+    write_bytes(path, concat(encode('P5\n' + string(width) + ' ' + string(height) + '\n255\n'), from_array(pixels)))
 }

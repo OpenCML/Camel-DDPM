@@ -17,8 +17,9 @@
 | 更新 | Camel 自动微分、全局梯度范数裁剪 1、Adam、EMA 0.999、非有限数检查 |
 | 采样 | 独立加载两个模型，DDIM eta=0、classifier-free guidance、VAE 解码、Camel 输出 PPM/NPY |
 
-核心实现为 [networks.cml](../src/networks.cml)。Python 仅处理网络下载、图像 codec、文件和进程管理，以及生成静态参数类型；不执行模型、自动微分或优化器。
-生成文件可用 `python3 tools/generate-model-params.py --check` 核对，参数初始化本身仍由 Camel 执行。
+核心实现为 [networks.cml](../src/networks.cml)。模型类型和初始化直接写在 [parameters.cml](../src/parameters.cml)，通用树优化器写在 [optim.cml](../src/optim.cml)。参数源生成器和六个生成模块已删除。Python 只负责下载、图像 codec、文件/进程管理和检查点清单校验，不执行模型、自动微分或优化器。
+
+新版依赖 Camel 的 `tree`、结构化 `Device<T>` 和 `Bytes` 文件接口，见 [运行时说明](../runtime/README.md)。迁移前后模型更新及恢复训练的实测见 [树基础设施验证](results/tree-infrastructure-validation.json)。原有 500 步实验对应此前的源码/运行时身份，新版实验使用新目录与新指纹。
 
 仅 `networks.mm` 显式授予 `reassociate, change_precision, finite_math`，Tiles 才选择动态加载的 cuBLAS `COMPUTE_32F_FAST_16BF` 路径。
 它将矩阵乘操作数转换为 BF16，FP32 累加并输出。缺失任一授权时保留默认 FP32 FMA 路径；需要 Ampere 或更新 GPU。

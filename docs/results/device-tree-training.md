@@ -18,7 +18,7 @@ Two independent runs on server `88zjwei`, physical GPU 2, produced:
 
 Logs and checkpoints: `/home/zjwei/projects/Camel-DDPM/runs/device-tree-training-001` and `device-tree-training-002`. The independent runtimes are `.camel-device-tree-v1` and `.camel-device-tree-v2`; the original `.camel` installation and earlier experiment identities remain intact.
 
-To reproduce using the new runtime, set `CAMEL_HOME` to `.camel-device-tree-v2`, `CAMEL_STD_LIB` to its `stdlib`, `CAMEL_PACKAGES` to the project `src`, and preload that runtime's `libstdc++.so.6` and `libgcc_s.so.1`. Select physical GPU 2 through `CUDA_VISIBLE_DEVICES=2` with `CAMEL_TILES_DEVICE=0`; keep host tensor threads at one. Invoke:
+The original observations above used project revision `a8f04f1`. The current example also uses generic `tree` operations and `Bytes`, so reproduce it with `.camel-tree-bytes-v2` (or the updated default installation). Set `CAMEL_HOME` to that installation, `CAMEL_STD_LIB` to its `stdlib`, `CAMEL_PACKAGES` to the project `src`, and preload that runtime's `libstdc++.so.6` and `libgcc_s.so.1`. Select physical GPU 2 through `CUDA_VISIBLE_DEVICES=2` with `CAMEL_TILES_DEVICE=0`; keep host tensor threads at one. Invoke:
 
 ```bash
 "$CAMEL_HOME/bin/camel" \
@@ -28,6 +28,6 @@ To reproduce using the new runtime, set `CAMEL_HOME` to `.camel-device-tree-v2`,
   examples/device-tree-step.cml std::macro std::fvm
 ```
 
-Use a fresh output directory. These are integration observations, not evidence of production image quality. Generic `std::tree`, native tree checkpoint publication, keyed random numbers and a complete device-resident step remain outstanding. Generated parameter modules remain until the generic tree operations replace all their responsibilities.
+Use a fresh output directory. These are integration observations, not evidence of production image quality. Generic `tree` operations now replace generated parameter operations. The migrated example produced the same 390 checkpoint files byte for byte. Native tree checkpoint publication, tensor/Bytes conversion, keyed random numbers and a complete device-resident step remain outstanding.
 
 WIT acquisition continues separately. The latest audited snapshot (`audit-003`) decoded 576 transported images, found 509 consistent license declarations and set 67 aside for review. Caption quality, duplicate grouping and sealed train/evaluation shards are still required; none of these raw WIT assets has been admitted to training yet.

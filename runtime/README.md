@@ -76,3 +76,12 @@ already present upstream. The server built this into independent
 [`device-tree-step.cml`](../examples/device-tree-step.cml).
 Actual model updates and checkpoint replay results are documented in
 [`device-tree-training.md`](../docs/results/device-tree-training.md).
+
+The current source additionally requires `camel-tree-ops.patch` (Camel `23d97db7`)
+and `camel-bytes-io.patch` (`dd0d6176`), in that order after the device tree change.
+These implement multi-tree `tree_map`, reference-based `tree_unzip`, ordered
+reductions, and explicit binary IO. `fs.read_chunk` now returns `Bytes`;
+IDX/RGB inputs and PGM/PPM outputs in this project have been migrated.
+The independent server runtime `.camel-tree-bytes-v2` contains these capabilities.
+Native VAE/diffusion training and exact interrupted/resumed state comparisons
+are recorded in `docs/results/tree-infrastructure-validation.json`.

@@ -1,10 +1,5 @@
 module networks
-import { Att } from params_att
-import { FF } from params_ff
-import { Encoder } from params_encoder
-import { Denoiser } from params_denoiser
-import { AE } from params_ae
-import { LD } from params_ld
+import { AE, Att, Denoiser, Encoder, FF, LD } from parameters
 import { Tensor, reshape, permute, transpose, exp, mean, sum } from tensor
 import { row_softmax, rms_norm } from attention
 import { patches, pixels } from text_image

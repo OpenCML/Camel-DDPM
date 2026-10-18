@@ -1,19 +1,20 @@
 module train_latent
-import { DeviceLD, initLD, loadLD, zeroLD, uploadLD, downloadLD, stepLD, emaLD, normLD, scaleLD } from params_ld
-import { DeviceAE, loadAE, uploadAE } from params_ae
+import { emaLD, normLD, scaleLD, stepLD } from parameter_ops
+import { zero_tree } from optim
+import { Device, download, run, run_device, upload } from tiles
+import { AE, LD, initLD, loadAE, loadLD } from parameters
 import { ld_grad, image_mean } from networks
 import { train_batch } from latent_data
 import { Tensor, seed, randn, set_num_threads } from tensor
 import { seed as random_seed, randint } from random
-import { run_device, run, download } from tiles
 import { read_text } from fs
 import { trim, split } from str
 import { save_params } from nn
 import { Schedule, schedule, embedding } from ddpm
 import { sqrt } from math
 
-type State = { p: DeviceLD, m: DeviceLD, v: DeviceLD, ema: DeviceLD }
-func train(state: State, ae: DeviceAE, ids: string[], data: string, s: Schedule, i: int, end: int, batch: int, initial_seed: int, rate: float): State sync {
+type State = { p: Device<LD>, m: Device<LD>, v: Device<LD>, ema: Device<LD> }
+func train(state: State, ae: Device<AE>, ids: string[], data: string, s: Schedule, i: int, end: int, batch: int, initial_seed: int, rate: float): State sync {
     return if i == end then state else sync {
         seed(initial_seed + i + 1)
         random_seed(initial_seed + i + 1)
@@ -37,15 +38,15 @@ func main(data: string, index: string, out: string, resume: string, ae_path: str
     set_num_threads(1)
     seed(initial_seed)
     let p = if resume == '' then initLD() else loadLD(resume + '/model/')
-    let m = if resume == '' then zeroLD(p) else loadLD(resume + '/adam_m/')
-    let v = if resume == '' then zeroLD(p) else loadLD(resume + '/adam_v/')
+    let m = if resume == '' then zero_tree(p) else loadLD(resume + '/adam_m/')
+    let v = if resume == '' then zero_tree(p) else loadLD(resume + '/adam_v/')
     let ema = if resume == '' then p else loadLD(resume + '/ema/')
-    let ae = uploadAE(loadAE(ae_path))
+    let ae = upload(loadAE(ae_path))
     let ids = read_text(index)->trim->split<'\n'>
-    let result = train({ p: uploadLD(p), m: uploadLD(m), v: uploadLD(v), ema: uploadLD(ema) }, ae, ids, data, schedule(timesteps), start, end, batch, initial_seed, rate)
-    save_params(downloadLD(result.p), out + '/model')
-    save_params(downloadLD(result.m), out + '/adam_m')
-    save_params(downloadLD(result.v), out + '/adam_v')
-    save_params(downloadLD(result.ema), out + '/ema')
+    let result = train({ p: upload(p), m: upload(m), v: upload(v), ema: upload(ema) }, ae, ids, data, schedule(timesteps), start, end, batch, initial_seed, rate)
+    save_params(download(result.p), out + '/model')
+    save_params(download(result.m), out + '/adam_m')
+    save_params(download(result.v), out + '/adam_v')
+    save_params(download(result.ema), out + '/ema')
     return 0
 }

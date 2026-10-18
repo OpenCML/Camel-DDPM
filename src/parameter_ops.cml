@@ -1,0 +1,14 @@
+// Concrete GPU entry signatures call the same generic tree implementations.
+module parameter_ops
+import { AE, LD } from parameters
+import { adam, norm_tree, scale_tree, ema_tree, distance_tree } from optim
+export func stepAE(p: AE, g: AE, m: AE, v: AE, rate: float, bc1: float, bc2: float): (AE, AE, AE) { return adam(p, g, m, v, rate, bc1, bc2) }
+export func stepLD(p: LD, g: LD, m: LD, v: LD, rate: float, bc1: float, bc2: float): (LD, LD, LD) { return adam(p, g, m, v, rate, bc1, bc2) }
+export func normAE(p: AE): float { return norm_tree(p) }
+export func normLD(p: LD): float { return norm_tree(p) }
+export func scaleAE(p: AE, factor: float): AE { return scale_tree(p, factor) }
+export func scaleLD(p: LD, factor: float): LD { return scale_tree(p, factor) }
+export func emaAE(avg: AE, p: AE): AE { return ema_tree(avg, p) }
+export func emaLD(avg: LD, p: LD): LD { return ema_tree(avg, p) }
+export func distanceAE(p: AE, q: AE): float { return distance_tree(p, q) }
+export func distanceLD(p: LD, q: LD): float { return distance_tree(p, q) }

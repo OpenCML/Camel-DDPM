@@ -1,6 +1,7 @@
 module text_data
 import { Tensor, reshape, permute } from tensor
 import { bytes } from str
+import { to_array } from bytes
 import { read_chunk, file_size } from fs
 import { min } from math
 
@@ -31,6 +32,6 @@ export func text_features(caption: string): Tensor<f32> { return byte_features(c
 
 export func rgb64(path: string): Tensor<f32> sync {
     if file_size(path) != 64 * 64 * 3 then sync { println('Invalid RGB64 byte count'); exit(1) }
-    let pixels = bytes(read_chunk(path, 0, 64 * 64 * 3))
+    let pixels = to_array(read_chunk(path, 0, 64 * 64 * 3))
     return permute(reshape(pixels, [64, 64, 3]) / 127.5 - 1.0, [2, 0, 1])
 }

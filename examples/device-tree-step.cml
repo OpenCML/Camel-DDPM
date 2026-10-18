@@ -1,8 +1,9 @@
 // Native parameter-tree integration for Camel's training infrastructure design.
 // Run on the server with the device-tree runtime; all learned weights start fresh.
 module device_tree_step
-import { AE, initAE, zeroAE, stepAE, distanceAE } from params_ae
-import { LD, initLD, zeroLD, stepLD, distanceLD } from params_ld
+import { distanceAE, distanceLD, stepAE, stepLD } from parameter_ops
+import { zero_tree } from optim
+import { AE, LD, initAE, initLD } from parameters
 import { ae_grad, image_mean, ld_grad } from networks
 import { train_batch } from latent_data
 import { Tensor, seed, randn, set_num_threads } from tensor
@@ -15,7 +16,7 @@ import { save_params } from nn
 
 type Parameters = { ae: AE, ld: LD }
 func initialize(): Parameters { return { ae: initAE(), ld: initLD() } }
-func zero(p: Parameters): Parameters { return { ae: zeroAE(p.ae), ld: zeroLD(p.ld) } }
+func zero(p: Parameters): Parameters { return { ae: zero_tree(p.ae), ld: zero_tree(p.ld) } }
 func noisy(z: Tensor<f32>, noise: Tensor<f32>): Tensor<f32> { return z * 0.8 + noise * 0.6 }
 func main(data: string, index: string, out: string): int sync {
     set_num_threads(1)

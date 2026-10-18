@@ -6,8 +6,8 @@ import { text_features } from text_data
 import { posterior } from patch_model
 import { Tensor, randn, seed, save_npy, reshape, permute, set_num_threads } from tensor
 import { min, max, sqrt, round } from math
-import { write_text } from fs
-import { from_bytes } from str
+import { write_bytes } from fs
+import { encode, concat, from_array } from bytes
 import { run } from tiles
 
 func sample(m: DeviceModel, s: Schedule, x: Tensor<f32>, text: Tensor<f32>, empty: Tensor<f32>, guidance: float, t: int): Tensor<f32> sync {
@@ -33,6 +33,6 @@ func main(model: string, prompt: string, out: string, timesteps: int, sample_see
     save_npy(x, out + '.npy')
     let flat = reshape(permute(reshape(x, [3, 64, 64]), [1, 2, 0]), [12288])
     let rgb = range(0, 12288)->map<(i: int): int => int(round((min(max(flat[i], -1.0), 1.0) + 1.0) * 127.5))>
-    write_text(out + '.ppm', 'P6\n64 64\n255\n' + from_bytes(rgb))
+    write_bytes(out + '.ppm', concat(encode('P6\n64 64\n255\n'), from_array(rgb)))
     return 0
 }

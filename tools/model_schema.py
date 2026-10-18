@@ -1,7 +1,7 @@
-"""Static tensor schemas for Camel source generation and checkpoint validation.
+"""Static tensor schemas for checkpoint validation.
 
 No model evaluation lives here. All initialization and tensor arithmetic are
-emitted as ordinary Camel programs and remain visible to autodiff/Tiles.
+written as ordinary Camel programs and remain visible to autodiff/Tiles.
 """
 import math
 

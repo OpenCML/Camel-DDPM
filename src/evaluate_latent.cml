@@ -1,17 +1,16 @@
 module evaluate_latent
-import { DeviceAE, loadAE, initAE, uploadAE } from params_ae
-import { DeviceLD, loadLD, initLD, uploadLD } from params_ld
+import { Device, run, upload } from tiles
+import { AE, LD, initAE, initLD, loadAE, loadLD } from parameters
 import { ae_eval, image_mean, ld_eval } from networks
 import { valid_item } from latent_data
 import { save_rgb } from rgb_output
 import { Tensor, randn, seed, concat, set_num_threads } from tensor
-import { run } from tiles
 import { read_text, write_text } from fs
 import { trim, split } from str
 import { Schedule, schedule, embedding } from ddpm
 import { sqrt, min } from math
 
-func eval_ae(p: DeviceAE, ids: string[], data: string, out: string, count: int, i: int, total: float, z: float, square: float): (float, float, float) sync {
+func eval_ae(p: Device<AE>, ids: string[], data: string, out: string, count: int, i: int, total: float, z: float, square: float): (float, float, float) sync {
     return if i == count then (total / float(count), z / float(count), square / float(count)) else sync {
         let input = valid_item(ids, data, i)
         let result = run<ae_eval>((p, input.image))
@@ -19,7 +18,7 @@ func eval_ae(p: DeviceAE, ids: string[], data: string, out: string, count: int, 
         return eval_ae(p, ids, data, out, count, i + 1, total + result.0, z + result.1, square + result.2)
     }
 }
-func eval_ld(p: DeviceLD, ae: DeviceAE, ids: string[], data: string, count: int, s: Schedule, i: int, total: float): float sync {
+func eval_ld(p: Device<LD>, ae: Device<AE>, ids: string[], data: string, count: int, s: Schedule, i: int, total: float): float sync {
     return if i == count * 3 then total / float(count * 3) else sync {
         seed(90000 + i / 3)
         let input = valid_item(ids, data, i / 3)
@@ -37,13 +36,13 @@ func main(stage: string, model: string, ae_path: string, data: string, index: st
     let ids = read_text(index)->trim->split<'\n'>
     let n = min(count, len(ids))
     if stage == 'vae' then sync {
-        let p = uploadAE(if model == '' then initAE() else loadAE(model))
+        let p = upload(if model == '' then initAE() else loadAE(model))
         let result = eval_ae(p, ids, data, out, n, 0, 0.0, 0.0, 0.0)
         write_text(out + '/metrics.json', '{"objective":"heldout_reconstruction_mse","mse":' + string(result.0) + ',"latent_mean":' + string(result.1) + ',"latent_second_moment":' + string(result.2) + ',"images":' + string(n) + '}\n')
         println('VALID VAE mse={} latent_mean={} latent_second_moment={}'->format<result.0, result.1, result.2>)
     } else sync {
-        let p = uploadLD(if model == '' then initLD() else loadLD(model))
-        let ae = uploadAE(loadAE(ae_path))
+        let p = upload(if model == '' then initLD() else loadLD(model))
+        let ae = upload(loadAE(ae_path))
         let result = eval_ld(p, ae, ids, data, n, schedule(timesteps), 0, 0.0)
         write_text(out + '/metrics.json', '{"objective":"heldout_latent_noise_mse","mse":' + string(result) + ',"images":' + string(n) + ',"times_per_image":3}\n')
         println('VALID LATENT mse={}'->format<result>)

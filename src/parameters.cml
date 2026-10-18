@@ -1,0 +1,145 @@
+// Model shapes and initialization are explicit Camel code; tree operations are generic.
+module parameters
+import { Tensor, randn, zeros, ones, load_npy } from tensor
+import { sqrt } from math
+import { tree_map, tree_paths } from tree
+
+export type Att = {
+    q: Tensor<f32>,
+    k: Tensor<f32>,
+    v: Tensor<f32>,
+    o: Tensor<f32>
+}
+export func initAtt(): Att {
+    return {
+        q: randn([128, 128], 0.0, sqrt(1.0 / 128.0)),
+        k: randn([128, 128], 0.0, sqrt(1.0 / 128.0)),
+        v: randn([128, 128], 0.0, sqrt(1.0 / 128.0)),
+        o: randn([128, 128], 0.0, sqrt(1.0 / 128.0))
+    }
+}
+
+export type FF = {
+    up: Tensor<f32>,
+    gate_w: Tensor<f32>,
+    down: Tensor<f32>
+}
+export func initFF(): FF {
+    return {
+        up: randn([128, 512], 0.0, sqrt(1.0 / 128.0)),
+        gate_w: randn([128, 512], 0.0, sqrt(1.0 / 128.0)),
+        down: randn([512, 128], 0.0, sqrt(1.0 / 512.0))
+    }
+}
+
+export type Encoder = {
+    att: Att,
+    ff: FF,
+    n1: Tensor<f32>,
+    n2: Tensor<f32>
+}
+export func initEncoder(): Encoder {
+    return {
+        att: initAtt(),
+        ff: initFF(),
+        n1: ones([128]),
+        n2: ones([128])
+    }
+}
+
+export type Denoiser = {
+    att: Att,
+    cross: Att,
+    ff: FF,
+    n1: Tensor<f32>,
+    n2: Tensor<f32>,
+    n3: Tensor<f32>,
+    time_w: Tensor<f32>
+}
+export func initDenoiser(): Denoiser {
+    return {
+        att: initAtt(),
+        cross: initAtt(),
+        ff: initFF(),
+        n1: ones([128]),
+        n2: ones([128]),
+        n3: ones([128]),
+        time_w: randn([16, 128], 0.0, 0.02)
+    }
+}
+
+export type AE = {
+    input_w: Tensor<f32>,
+    encoder0: Encoder,
+    encoder1: Encoder,
+    pos_e: Tensor<f32>,
+    mu: Tensor<f32>,
+    logvar: Tensor<f32>,
+    decoder_w: Tensor<f32>,
+    pos_d: Tensor<f32>,
+    decoder0: Encoder,
+    decoder1: Encoder,
+    output_w: Tensor<f32>,
+    output_b: Tensor<f32>
+}
+export func initAE(): AE {
+    return {
+        input_w: randn([192, 128], 0.0, sqrt(1.0 / 192.0)),
+        encoder0: initEncoder(),
+        encoder1: initEncoder(),
+        pos_e: randn([64, 128], 0.0, 0.02),
+        mu: randn([128, 4], 0.0, 0.02),
+        logvar: randn([128, 4], 0.0, 0.02),
+        decoder_w: randn([4, 128], 0.0, sqrt(1.0 / 4.0)),
+        pos_d: randn([64, 128], 0.0, 0.02),
+        decoder0: initEncoder(),
+        decoder1: initEncoder(),
+        output_w: randn([128, 192], 0.0, 0.02),
+        output_b: zeros([192])
+    }
+}
+
+export type LD = {
+    token: Tensor<f32>,
+    pos_t: Tensor<f32>,
+    text0: Encoder,
+    text1: Encoder,
+    text_norm: Tensor<f32>,
+    image_w: Tensor<f32>,
+    pos_i: Tensor<f32>,
+    time_w: Tensor<f32>,
+    block0: Denoiser,
+    block1: Denoiser,
+    block2: Denoiser,
+    block3: Denoiser,
+    output_w: Tensor<f32>,
+    output_b: Tensor<f32>
+}
+export func initLD(): LD {
+    return {
+        token: randn([259, 128], 0.0, 0.02),
+        pos_t: randn([128, 128], 0.0, 0.02),
+        text0: initEncoder(),
+        text1: initEncoder(),
+        text_norm: ones([128]),
+        image_w: randn([4, 128], 0.0, sqrt(1.0 / 4.0)),
+        pos_i: randn([64, 128], 0.0, 0.02),
+        time_w: randn([16, 128], 0.0, 0.02),
+        block0: initDenoiser(),
+        block1: initDenoiser(),
+        block2: initDenoiser(),
+        block3: initDenoiser(),
+        output_w: randn([128, 4], 0.0, 0.02),
+        output_b: zeros([4])
+    }
+}
+
+export func loadAE(path: string): AE sync {
+    let paths = tree_paths(initAE())
+    return tree_map<(leaf: string): Tensor<f32> => load_npy(path + leaf + '.npy') as Tensor<f32>>(paths)
+}
+
+export func loadLD(path: string): LD sync {
+    let paths = tree_paths(initLD())
+    return tree_map<(leaf: string): Tensor<f32> => load_npy(path + leaf + '.npy') as Tensor<f32>>(paths)
+}

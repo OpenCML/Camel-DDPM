@@ -1,0 +1,23 @@
+{
+  "native_vae_updates": 2,
+  "native_diffusion_updates": 2,
+  "vae_resume_identical_leaves": 176,
+  "diffusion_resume_identical_leaves": 344,
+  "all_checkpoint_values_finite_f32": true,
+  "sample_rgb_shape": [
+    64,
+    64,
+    3
+  ],
+  "sample_sha256": "beb4565500c6af71cc6977354c6966e5b3c229c42af57d31a6bef5549bdb9358",
+  "wall_seconds": {
+    "vae-continuous": 6.131922336295247,
+    "vae-first": 5.375526366755366,
+    "vae-resumed": 5.476065795868635,
+    "ld-continuous": 11.139216008596122,
+    "ld-first": 10.233136123977602,
+    "ld-resumed": 10.385380681604147,
+    "sample": 2.5683944541960955
+  },
+  "production_quality": false
+}

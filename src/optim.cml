@@ -1,9 +1,30 @@
 module optim
-import { Tensor, sqrt } from tensor
+import { Tensor, sqrt, sum } from tensor
+import { tree_map, tree_unzip, tree_reduce } from tree
 
 // FP32 master parameters and moments. Mixed precision never changes Adam state.
 export func adam_leaf(p: Tensor<f32>, g: Tensor<f32>, m: Tensor<f32>, v: Tensor<f32>, rate: float, bc1: float, bc2: float): (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
     let nm = m * 0.9 + g * 0.1
     let nv = v * 0.999 + g * g * 0.001
     return (p - rate * (nm / bc1) / (sqrt(nv / bc2) + 0.00000001), nm, nv)
+}
+
+export func zero_tree(p: typeas P): P { return tree_map<(x: Tensor<f32>): Tensor<f32> => x * 0.0>(p) }
+export func scale_tree(p: typeas P, factor: float): P {
+    return tree_map<(x: Tensor<f32>): Tensor<f32> => x * factor>(p)
+}
+export func ema_tree(avg: typeas P, p: P): P {
+    return tree_map<(a: Tensor<f32>, b: Tensor<f32>): Tensor<f32> => a * 0.999 + b * 0.001>(avg, p)
+}
+export func norm_tree(p: typeas P): float {
+    let terms = tree_map<(x: Tensor<f32>): float => sum(x * x)>(p)
+    return tree_reduce<(a: float, b: float): float => a + b>(terms, 0.0)
+}
+export func distance_tree(p: typeas P, q: P): float {
+    let terms = tree_map<(a: Tensor<f32>, b: Tensor<f32>): float => sum((a - b) * (a - b))>(p, q)
+    return tree_reduce<(a: float, b: float): float => a + b>(terms, 0.0)
+}
+export func adam(p: typeas P, g: P, m: P, v: P, rate: float, bc1: float, bc2: float): (P, P, P) {
+    let result = tree_map<(a: Tensor<f32>, b: Tensor<f32>, c: Tensor<f32>, d: Tensor<f32>) => adam_leaf(a, b, c, d, rate, bc1, bc2)>(p, g, m, v)
+    return tree_unzip(result, p)
 }

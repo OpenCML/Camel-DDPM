@@ -1,0 +1,1416 @@
+From dd0d6176cb2073fce6197f6d179f815086cdf00c Mon Sep 17 00:00:00 2001
+From: Zhenjie Wei <Kogler_S@outlook.com>
+Date: Sun, 18 Oct 2026 23:52:56 +0800
+Subject: [PATCH 2/2] feat: separate binary training data from UTF-8 file
+ interfaces
+
+---
+ CMakeLists.txt                             |   1 +
+ docs/design/training/bytes.cn.md           |  23 +++
+ docs/design/training/implementation.cn.md  |   4 +-
+ docs/stdlib-reference.md                   | 117 ++++++++++++-
+ include/camel/core/rtdata/bytes.h          |  36 ++++
+ include/camel/core/type/bytes.h            |  31 ++++
+ modules/bytes/CMakeLists.txt               |   2 +
+ modules/bytes/module.cpp                   | 143 +++++++++++++++
+ modules/crypto/module.cpp                  |   7 +-
+ modules/crypto/operators.cpp               |  10 +-
+ modules/fs/CMakeLists.txt                  |   2 +-
+ modules/fs/binary.cpp                      | 195 +++++++++++++++++++++
+ modules/fs/binary.h                        |  16 ++
+ modules/fs/module.cpp                      |  28 ++-
+ modules/fs/operators.cpp                   |  49 +++++-
+ scripts/stdlib-reference.mjs               |   1 +
+ src/core/rtdata/bytes.cpp                  |  82 +++++++++
+ src/core/type/bytes.cpp                    |  37 ++++
+ stdlib/signatures/bytes.cml                |  45 +++++
+ stdlib/signatures/crypto.cml               |   3 +
+ stdlib/signatures/fs.cml                   |  29 ++-
+ test/cases/modules/bytes_text_reject.cml   |  10 ++
+ test/cases/modules/bytes_values.cml        |  26 +++
+ test/cases/modules/fs_binary_roundtrip.cml |  12 +-
+ test/cases/modules/std/fs/basic.cml        |   3 +-
+ test/cases/modules/stdlib/registry_all.cml |   1 +
+ test/cases/para/core/file_chunk_hash.cml   |   2 +-
+ test/plans/feat/modules/bytes.plan.toml    |  22 +++
+ 28 files changed, 903 insertions(+), 34 deletions(-)
+ create mode 100644 docs/design/training/bytes.cn.md
+ create mode 100644 include/camel/core/rtdata/bytes.h
+ create mode 100644 include/camel/core/type/bytes.h
+ create mode 100644 modules/bytes/CMakeLists.txt
+ create mode 100644 modules/bytes/module.cpp
+ create mode 100644 modules/fs/binary.cpp
+ create mode 100644 modules/fs/binary.h
+ create mode 100644 src/core/rtdata/bytes.cpp
+ create mode 100644 src/core/type/bytes.cpp
+ create mode 100644 stdlib/signatures/bytes.cml
+ create mode 100644 test/cases/modules/bytes_text_reject.cml
+ create mode 100644 test/cases/modules/bytes_values.cml
+ create mode 100644 test/plans/feat/modules/bytes.plan.toml
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 01a38e4c..1ed0425f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -179,6 +179,7 @@ add_subdirectory(modules/tiles)
+ add_subdirectory(modules/nn)
+ add_subdirectory(modules/autodiff)
+ add_subdirectory(modules/tree)
++add_subdirectory(modules/bytes)
+ add_subdirectory(modules/onnx)
+ 
+ # CLI and tools: link the libcamel shell (camel-cli lives under tools).
+diff --git a/docs/design/training/bytes.cn.md b/docs/design/training/bytes.cn.md
+new file mode 100644
+index 00000000..0cac4409
+--- /dev/null
++++ b/docs/design/training/bytes.cn.md
+@@ -0,0 +1,23 @@
++# 二进制值与文件接口实现
++
++2026-10-18。语言作者已确认设计稿 T5：`read_chunk` 改为返回 `Bytes`，同步迁移调用处。
++
++`Bytes` 是核心拥有的不可变名义类型。数据内联存放于 GC 对象中，保存完整长度，没有以 NUL 结尾的约定，也没有指向外部缓冲的悬垂引用。`bytes` 模块导出类型以及以下纯函数：
++
++- `encode(string): Bytes`：验证并复制 UTF-8 文本。
++- `decode(Bytes): string!`：严格检查 UTF-8；拒绝过长编码、代理码点、截断、错误续字节与超出 Unicode 范围的值，失败返回 `EncodingError`。
++- `from_array(int[]): Bytes` / `to_array(Bytes): int[]`：逐字节显式转换，整数须在 0..255。
++- `size(Bytes): int` / `concat(Bytes, Bytes): Bytes`：不解码、不修改输入。
++
++文件接口分开处理文本和二进制：
++
++- `read_bytes` / `write_bytes` 处理 `Bytes`；`read_chunk` 现在返回 `Bytes`。
++- `read_text` / `write_text` 检查 UTF-8，错误提示改用二进制接口；`try_read_text` 在解码失败时返回 `EncodingError`。合法的 UTF-8 仍可含 NUL，按长度读写。
++- `replace(path, bytes)` 使用同目录独占创建的临时文件。Linux 写完后 `fsync` 文件、关闭、改名并 `fsync` 目录；失败清理本次临时文件。Windows 使用 `FlushFileBuffers` 与带替换和写穿标志的 `MoveFileExW`，该平台分支本轮未执行。
++- `crypto::sha256` 新增 `Bytes` 重载。块哈希调用先计算一次二进制 SHA-256，再对十六进制文本执行剩余轮次，保持原来的总轮数。
++
++已迁移仓库中的分块文件哈希、文件示例、二进制回归用例，以及 DDPM 的 IDX/RGB 输入和 PGM/PPM 输出。文本签名和生成的标准库参考文档同时更新。
++
++服务器手动验证：8 字节含 NUL/高位字节的往返与分块读取保持原值；SHA-256 为 `26aa5dd8eb311cb23d596c9ecb8cd1d959e3215033223177ee68a40f3ac4e2f0`；中英文与含 NUL 的合法 UTF-8 能显式往返；非法 UTF-8 解码返回错误；文本读取器拒绝二进制；原子替换与空文件替换成功。FVM 上启用分代 GC 校验和 minor safepoint stress 后，相同二进制用例也通过。
++
++尚待第一阶段其余工作：张量与 Bytes 的小端互转、原生 `save_tree` / `load_tree`，以及旧 `str::from_bytes` 等可构造非 UTF-8 字符串的接口的全面收口。本轮没有将这些剩余能力标为完成。
+diff --git a/docs/design/training/implementation.cn.md b/docs/design/training/implementation.cn.md
+index 67b88417..dd055b1f 100644
+--- a/docs/design/training/implementation.cn.md
++++ b/docs/design/training/implementation.cn.md
+@@ -26,6 +26,8 @@ DDPM 项目新增 `examples/device-tree-step.cml`，在真实的已封存图像
+ 
+ ## 尚未完成
+ 
+-`std::tree` 已按作者修订完成编译期展开，见 [参数树实现](tree.cn.md)。第一阶段的 `Bytes` 与文件接口、原生树检查点及 DDPM 迁移继续推进。设备随机数、完整常驻训练步、传输统计、真正的 bf16 存储、重计算、耐久性与四卡训练继续按设计阶段推进；先前的 NCCL 草稿已独立暂存，不作为可用功能。
++`std::tree` 已按作者修订完成编译期展开，见 [参数树实现](tree.cn.md)。`Bytes`、文本/二进制文件接口和原子替换已实现，见 [二进制接口](bytes.cn.md)。DDPM 已删除参数源生成器及六个生成模块，改用显式 Camel 初始化与通用树优化器；实际模型迁移前后的 390 个状态文件字节一致，VAE/扩散的短程连续训练与中断恢复也分别有 176/344 个状态文件字节一致。
++
++第一阶段仍缺张量/Bytes 小端互转、原生树检查点和遗留二进制字符串接口的收口。设备随机数、完整常驻训练步、传输统计、真正的 bf16 存储、重计算、耐久性与四卡训练继续按设计阶段推进；先前的 NCCL 草稿已独立暂存，不作为可用功能。
+ 
+ 手动运行还暴露了已有的声明类型问题：`let p: Model = { ...带具体形状的张量... }` 通过结构可赋值检查后，又因结构体的显式转换只接受相同类型而被拒绝。当前示例通过返回类型为 `Model` 的初始化函数构造参数。该缺陷尚未修复；不能为通过测试而修改显式转换的既定语义。
+diff --git a/docs/stdlib-reference.md b/docs/stdlib-reference.md
+index 84a54c1c..0e1aee4d 100644
+--- a/docs/stdlib-reference.md
++++ b/docs/stdlib-reference.md
+@@ -33,13 +33,14 @@ bridge (`python`, `pyplot`) and the profiler (`perf`).
+ |---|---|---|---|
+ | [built-in](#built-in-functions) | none | C++ | 47 |
+ | [str](#str) | `import { ... } from str` | C++ | 20 |
++| [bytes](#bytes) | `import { ... } from bytes` | C++ | 6 |
+ | [array](#array) | `import { ... } from array` | Camel | 17 |
+ | [math](#math) | `import { ... } from math` | C++ | 45 |
+ | [statistics](#statistics) | `import { ... } from statistics` | C++ | 5 |
+ | [algo](#algo) | `import { ... } from algo` | C++ | 8 |
+ | [random](#random) | `import { ... } from random` | C++ | 7 |
+ | [time](#time) | `import { ... } from time` | C++ | 3 |
+-| [fs](#fs) | `import { ... } from fs` | C++ | 10 |
++| [fs](#fs) | `import { ... } from fs` | C++ | 13 |
+ | [os](#os) | `import { ... } from os` | C++ | 8 |
+ | [sys](#sys) | `import { ... } from sys` | C++ | 2 |
+ | [json](#json) | `import { ... } from json` | C++ | 12 |
+@@ -926,6 +927,78 @@ The count code points of s that start at code point start.
+ - Failure: error `EncodingError` when s is not valid UTF-8; fault `IndexOutOfRange` when start or start + count lies outside the string; fault `InvalidArgument` when count is negative.
+ - Example: `'h€llo'->char_substr<1, 2> !! '?'` gives `'€l'`
+ 
++<a id="bytes"></a>
++
++## `bytes`: immutable binary values and UTF-8 conversion
++
++#### `encode`
++
++```camel
++encode: (text: string) => Bytes
++```
++
++Encodes valid UTF-8 text as an immutable Bytes value.
++
++- Pure.
++- Failure: fault `InvalidArgument` when legacy string content is malformed UTF-8.
++- Example: `encode('hello')`
++
++#### `decode`
++
++```camel
++decode: (content: Bytes) => string!
++```
++
++Decodes UTF-8, returning an EncodingError value for malformed input.
++
++- Pure.
++- Example: `decode(encode('中文')) !! ''`
++
++#### `from_array`
++
++```camel
++from_array: (values: int[]) => Bytes
++```
++
++Copies integers in the inclusive range 0..255 into a binary value.
++
++- Pure.
++- Failure: fault `InvalidArgument` for an element outside 0..255.
++- Example: `from_array([0, 128, 255])`
++
++#### `to_array`
++
++```camel
++to_array: (content: Bytes) => int[]
++```
++
++Copies each byte into an integer array.
++
++- Pure.
++- Example: `to_array(encode('AB'))` gives `[65, 66]`
++
++#### `size`
++
++```camel
++size: (content: Bytes) => int
++```
++
++The number of bytes in the binary value.
++
++- Pure.
++- Example: `size(encode('abc'))` gives `3`
++
++#### `concat`
++
++```camel
++concat: (left: Bytes, right: Bytes) => Bytes
++```
++
++Concatenates two binary values without decoding either one.
++
++- Pure.
++- Example: `concat(encode('header'), from_array([0, 255]))`
++
+ <a id="array"></a>
+ 
+ ## `array`: arrays and higher-order functions
+@@ -2015,7 +2088,7 @@ read_text: (path: string) => string
+ The whole content of the file.
+ 
+ - With effects: reads a file.
+-- Failure: fault `FileOpenFailed` when the file cannot be opened; use try_read_text to handle that in the program.
++- Failure: fault `FileOpenFailed` when the file cannot be opened; fault `InvalidArgument` for malformed UTF-8; use read_bytes for binary files.
+ - Example: `read_text('notes.txt')` gives `the text of the file`
+ 
+ #### `try_read_text`
+@@ -2027,13 +2100,13 @@ try_read_text: (path: string) => string!
+ The whole content of the file, or an error value.
+ 
+ - With effects: reads a file.
+-- Failure: error `IOError` when the path is a directory, or the file cannot be opened or read.
++- Failure: error `IOError` when the path is a directory, or the file cannot be opened or read; error `EncodingError` for malformed UTF-8.
+ - Example: `try_read_text('notes.txt') !! ''` gives `the text, or '' when it cannot be read`
+ 
+ #### `read_chunk`
+ 
+ ```camel
+-read_chunk: (path: string, offset: int, size: int) => string
++read_chunk: (path: string, offset: int, size: int) => Bytes
+ ```
+ 
+ Up to size bytes of the file starting at byte offset; fewer at the end of the file.
+@@ -2042,6 +2115,39 @@ Up to size bytes of the file starting at byte offset; fewer at the end of the fi
+ - Failure: fault `InvalidArgument` when offset or size is negative; fault `FileOpenFailed` or `FileSystemError` when the file cannot be opened or read.
+ - Example: `read_chunk('notes.txt', 0, 16)` gives `the first 16 bytes`
+ 
++#### `read_bytes`
++
++```camel
++read_bytes: (path: string) => Bytes
++```
++
++The complete binary content, preserving every byte.
++
++- With effects: reads a file.
++- Example: `read_bytes('pixels.bin')`
++
++#### `write_bytes`
++
++```camel
++write_bytes: (path: string, content: Bytes) => void
++```
++
++Writes binary content, creating parent directories when needed.
++
++- With effects: writes a file.
++- Example: `write_bytes('pixels.bin', payload)`
++
++#### `replace`
++
++```camel
++replace: (path: string, content: Bytes) => void
++```
++
++Flushes a temporary in the same directory and atomically replaces the destination.
++
++- With effects: writes and replaces a file.
++- Example: `replace('checkpoint.bin', payload)`
++
+ #### `write_text`
+ 
+ ```camel
+@@ -2051,7 +2157,7 @@ write_text: (path: string, content: string) => void
+ Replaces the content of the file, creating it and its parent directories when needed.
+ 
+ - With effects: writes a file.
+-- Failure: fault `FileSystemError` when a directory cannot be created; fault `FileOpenFailed` when the file cannot be opened.
++- Failure: fault `FileSystemError` when a directory cannot be created; fault `FileOpenFailed` when the file cannot be opened; fault `InvalidArgument` for malformed UTF-8.
+ - Example: `write_text('out/log.txt', 'done')`
+ 
+ #### `exists`
+@@ -2445,6 +2551,7 @@ Whether the regular expression (ECMAScript syntax) matches somewhere in text.
+ 
+ ```camel
+ sha256: (s: string) => string
++sha256: (s: Bytes) => string
+ ```
+ 
+ The SHA-256 digest of the bytes of s, as 64 lower-case hexadecimal digits.
+diff --git a/include/camel/core/rtdata/bytes.h b/include/camel/core/rtdata/bytes.h
+new file mode 100644
+index 00000000..3e843d77
+--- /dev/null
++++ b/include/camel/core/rtdata/bytes.h
+@@ -0,0 +1,36 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Inline, immutable bytes move with the GC object and contain no traced references.
++#pragma once
++#include "camel/core/rtdata/base.h"
++#include <optional>
++#include <string_view>
++namespace camel::core::rtdata {
++class BytesObject final : public Object {
++  public:
++    static BytesObject *from(std::string_view bytes, mm::IAllocator &allocator);
++    std::string_view view() const;
++    size_t size() const;
++    bool equals(const Object *other, const type::Type *type, bool deep = false) const override;
++    Object *
++    clone(mm::IAllocator &allocator, const type::Type *type, bool deep = false) const override;
++    void print(std::ostream &os, const type::Type *type) const override;
++    void onMoved() override;
++    void updateRefs(const RefRelocator &, const type::Type *) override;
++
++  private:
++    explicit BytesObject(size_t length);
++    size_t length_;
++    char data_[];
++};
++// Returns the first malformed byte; a missing value means valid UTF-8.
++std::optional<size_t> invalidUtf8Offset(std::string_view bytes);
++} // namespace camel::core::rtdata
+diff --git a/include/camel/core/type/bytes.h b/include/camel/core/type/bytes.h
+new file mode 100644
+index 00000000..19b31856
+--- /dev/null
++++ b/include/camel/core/type/bytes.h
+@@ -0,0 +1,31 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// One core-owned immutable binary type shared by file, tensor and codec modules.
++#pragma once
++#include "camel/core/type/other.h"
++namespace camel::core::type {
++class BytesType final : public OtherType {
++  public:
++    static BytesType *get();
++    static TypeCode typeCode();
++    std::string toString() const override;
++    std::string mangle() const override;
++    Type *clone(bool deep = false) const override;
++    bool equals(Type *other) const override;
++    bool assignableFrom(Type *other) const override;
++    CastSafety castSafetyFrom(Type *other) const override;
++    OtherType *cloneWithParams(std::span<Type *const> params) const override;
++
++  private:
++    BytesType();
++};
++bool isBytesType(const Type *type);
++} // namespace camel::core::type
+diff --git a/modules/bytes/CMakeLists.txt b/modules/bytes/CMakeLists.txt
+new file mode 100644
+index 00000000..b6932764
+--- /dev/null
++++ b/modules/bytes/CMakeLists.txt
+@@ -0,0 +1,2 @@
++include(${CMAKE_CURRENT_SOURCE_DIR}/../camel_module.cmake)
++add_camel_module(NAME bytes SOURCES module.cpp)
+diff --git a/modules/bytes/module.cpp b/modules/bytes/module.cpp
+new file mode 100644
+index 00000000..6818db8f
+--- /dev/null
++++ b/modules/bytes/module.cpp
+@@ -0,0 +1,143 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Explicit binary/text boundaries. Invalid UTF-8 is a value-level decoding error.
++#include "camel/core/context/context.h"
++#include "camel/core/error/runtime.h"
++#include "camel/core/module/builtin.h"
++#include "camel/core/operator_traits.h"
++#include "camel/core/rtdata/array.h"
++#include "camel/core/rtdata/bytes.h"
++#include "camel/core/rtdata/string.h"
++#include "camel/core/rtdata/tagged.h"
++#include "camel/core/type/bytes.h"
++#include "camel/core/type/composite/array.h"
++#include "camel/core/type/resolver.h"
++#include "camel/execute/executor.h"
++#include <limits>
++
++namespace {
++using namespace camel::core::context;
++using namespace camel::core::module;
++using namespace camel::core::type;
++using namespace camel::core::rtdata;
++using namespace camel::core::error;
++namespace mm = camel::core::mm;
++slot_t encodeKernel(ArgsView &, ArgsView &norm, Context &) {
++    const std::string text(norm.get<::String *>(0)->view());
++    if (const auto bad = invalidUtf8Offset(text))
++        throwRuntimeFault(
++            RuntimeDiag::InvalidArgument,
++            "bytes.encode",
++            "invalid UTF-8 at byte " + std::to_string(*bad));
++    return toSlot(BytesObject::from(text, mm::autoSpace()));
++}
++slot_t decodeKernel(ArgsView &, ArgsView &norm, Context &) {
++    const std::string bytes(norm.get<BytesObject *>(0)->view());
++    if (const auto bad = invalidUtf8Offset(bytes))
++        return makeError(
++            "EncodingError",
++            "invalid UTF-8 at byte " + std::to_string(*bad),
++            "<bytes::decode>");
++    if (bytes.size() > std::numeric_limits<uint32_t>::max())
++        return makeError(
++            "EncodingError",
++            "decoded text exceeds the string size limit",
++            "<bytes::decode>");
++    return makeOk(
++        toSlot(::String::from(bytes, mm::autoSpace())),
++        TupleType::fallible(Type::String()));
++}
++slot_t fromArrayKernel(ArgsView &, ArgsView &norm, Context &) {
++    auto *array = norm.get<::Array *>(0);
++    std::string bytes(array->size(), '\0');
++    for (size_t i = 0; i < array->size(); ++i) {
++        const auto value = array->get<int64_t>(i);
++        if (value < 0 || value > 255)
++            throwRuntimeFault(
++                RuntimeDiag::InvalidArgument,
++                "bytes.from_array",
++                "element " + std::to_string(i) + " is outside 0..255");
++        bytes[i] = static_cast<char>(value);
++    }
++    return toSlot(BytesObject::from(bytes, mm::autoSpace()));
++}
++slot_t toArrayKernel(ArgsView &, ArgsView &norm, Context &) {
++    const std::string bytes(norm.get<BytesObject *>(0)->view());
++    auto *out = ::Array::create(mm::autoSpace(), bytes.size());
++    for (size_t i = 0; i < bytes.size(); ++i)
++        out->set<int64_t>(i, static_cast<unsigned char>(bytes[i]));
++    return toSlot(out);
++}
++slot_t sizeKernel(ArgsView &, ArgsView &norm, Context &) {
++    const auto size = norm.get<BytesObject *>(0)->size();
++    if (size > INT64_MAX)
++        throwRuntimeFault(RuntimeDiag::InvalidArgument, "bytes.size", "length exceeds int range");
++    return toSlot(static_cast<int64_t>(size));
++}
++slot_t concatKernel(ArgsView &, ArgsView &norm, Context &) {
++    std::string bytes(norm.get<BytesObject *>(0)->view());
++    bytes.append(norm.get<BytesObject *>(1)->view());
++    return toSlot(BytesObject::from(bytes, mm::autoSpace()));
++}
++class BytesExecutor final : public Executor {
++  public:
++    explicit BytesExecutor(context_ptr_t ctx)
++        : Executor(
++              std::move(ctx), {{"encode", encodeKernel},
++                               {"decode", decodeKernel},
++                               {"from_array", fromArrayKernel},
++                               {"to_array", toArrayKernel},
++                               {"size", sizeKernel},
++                               {"concat", concatKernel}}) {}
++};
++class BytesModule final : public BuiltinModule {
++  public:
++    explicit BytesModule(context_ptr_t ctx) : BuiltinModule("bytes", std::move(ctx)) {
++        auto *b = BytesType::get();
++        auto *s = Type::String();
++        auto *a = ArrayType::create(Type::Int64());
++        exportType(Reference("Bytes"), b);
++        const auto add = [&](const std::string &name, const param_init_list_t &args, Type *result) {
++            exportEntity(
++                name,
++                OperatorGroup::create(
++                    name,
++                    {{"bytes:" + name, StaticFuncTypeResolver::create({}, args, result)}}));
++        };
++        add("encode", {{s, false}}, b);
++        add("decode", {{b, false}}, TupleType::fallible(s));
++        add("from_array", {{a, false}}, b);
++        add("to_array", {{b, false}}, a);
++        add("size", {{b, false}}, Type::Int64());
++        add("concat", {{b, false}, {b, false}}, b);
++    }
++    bool load() override {
++        if (loaded_)
++            return true;
++        context_->registerExecutorFactory("bytes", [ctx = context_]() {
++            return std::make_shared<BytesExecutor>(ctx);
++        });
++        camel::core::OperatorTable::instance().declare(
++            "bytes",
++            {{"encode", true},
++             {"decode", true},
++             {"from_array", true},
++             {"to_array", true},
++             {"size", true},
++             {"concat", true}});
++        loaded_ = true;
++        return true;
++    }
++};
++} // namespace
++extern "C" Module *camel_module_create(Context *ctx) {
++    return new BytesModule(ctx->shared_from_this());
++}
+diff --git a/modules/crypto/module.cpp b/modules/crypto/module.cpp
+index c9151326..cb840405 100644
+--- a/modules/crypto/module.cpp
++++ b/modules/crypto/module.cpp
+@@ -15,9 +15,10 @@
+ #include "module.h"
+ #include "camel/compile/gir.h"
+ #include "camel/core/context/context.h"
++#include "camel/core/operator_traits.h"
+ #include "camel/core/type.h"
++#include "camel/core/type/bytes.h"
+ #include "camel/core/type/resolver.h"
+-#include "camel/core/operator_traits.h"
+ #include "executor.h"
+ #include "operators.h"
+ 
+@@ -31,7 +32,9 @@ const std::vector<oper_group_ptr_t> &getOperatorGroups() {
+         OperatorGroup::create(
+             "sha256",
+             {{"crypto:sha256",
+-              StaticFuncTypeResolver::create({}, {{Type::String(), false}}, Type::String())}}),
++              StaticFuncTypeResolver::create({}, {{Type::String(), false}}, Type::String())},
++             {"crypto:sha256",
++              StaticFuncTypeResolver::create({}, {{BytesType::get(), false}}, Type::String())}}),
+         OperatorGroup::create(
+             "sha256_rounds",
+             {{"crypto:sha256_rounds",
+diff --git a/modules/crypto/operators.cpp b/modules/crypto/operators.cpp
+index 250c9f7b..b6906cb9 100644
+--- a/modules/crypto/operators.cpp
++++ b/modules/crypto/operators.cpp
+@@ -12,11 +12,13 @@
+  * See the the MIT license for more details.
+  */
+ 
+-#include <format>
+ #include "operators.h"
+ #include "camel/core/context/context.h"
+ #include "camel/core/error/runtime.h"
++#include "camel/core/rtdata/bytes.h"
+ #include "camel/core/rtdata/string.h"
++#include "camel/core/type/bytes.h"
++#include <format>
+ 
+ #include <array>
+ #include <cstdint>
+@@ -126,8 +128,10 @@ std::unordered_map<std::string, operator_t> getCryptoOpsMap() {
+ }
+ 
+ slot_t __crypto_sha256__(ArgsView &with, ArgsView &norm, Context &ctx) {
+-    String *input = norm.get<String *>(0);
+-    return toSlot(String::from(sha256Hex(input->view()), mm::autoSpace()));
++    const auto input = camel::core::type::isBytesType(norm.type(0))
++                           ? norm.get<BytesObject *>(0)->view()
++                           : norm.get<String *>(0)->view();
++    return toSlot(String::from(sha256Hex(input), mm::autoSpace()));
+ }
+ 
+ slot_t __crypto_sha256_rounds__(ArgsView &with, ArgsView &norm, Context &ctx) {
+diff --git a/modules/fs/CMakeLists.txt b/modules/fs/CMakeLists.txt
+index a76333af..b73fd694 100644
+--- a/modules/fs/CMakeLists.txt
++++ b/modules/fs/CMakeLists.txt
+@@ -1,2 +1,2 @@
+ include(${CMAKE_CURRENT_SOURCE_DIR}/../camel_module.cmake)
+-add_camel_module(NAME fs)
++add_camel_module(NAME fs SOURCES executor.cpp module.cpp operators.cpp binary.cpp)
+diff --git a/modules/fs/binary.cpp b/modules/fs/binary.cpp
+new file mode 100644
+index 00000000..eba666cc
+--- /dev/null
++++ b/modules/fs/binary.cpp
+@@ -0,0 +1,195 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Atomic publication flushes a same-directory temporary before replacing the target.
++#include "binary.h"
++#include "camel/core/error/runtime.h"
++#include "camel/core/mm.h"
++#include "camel/core/rtdata/bytes.h"
++#include "camel/core/rtdata/string.h"
++#include <algorithm>
++#include <atomic>
++#include <cerrno>
++#include <filesystem>
++#include <fstream>
++#include <system_error>
++#ifdef _WIN32
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#else
++#include <fcntl.h>
++#include <unistd.h>
++#endif
++namespace {
++using namespace camel::core::rtdata;
++using namespace camel::core::error;
++namespace fs = std::filesystem;
++void systemFailure(const char *op, const std::string &path, const std::string &reason) {
++    throwRuntimeFault(RuntimeDiag::FileSystemError, op, path, reason);
++}
++void atomicReplace(const fs::path &path, std::string_view bytes) {
++    static std::atomic<uint64_t> sequence{0};
++    fs::path temporary;
++#ifdef _WIN32
++    HANDLE file = INVALID_HANDLE_VALUE;
++    for (size_t attempt = 0; attempt < 128; ++attempt) {
++        temporary = path;
++        temporary += ".pending-" + std::to_string(GetCurrentProcessId()) + "-" +
++                     std::to_string(sequence.fetch_add(1));
++        file = CreateFileW(
++            temporary.c_str(),
++            GENERIC_WRITE,
++            0,
++            nullptr,
++            CREATE_NEW,
++            FILE_ATTRIBUTE_NORMAL,
++            nullptr);
++        if (file != INVALID_HANDLE_VALUE)
++            break;
++        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS)
++            throw std::system_error(
++                GetLastError(),
++                std::system_category(),
++                "create replacement temporary");
++    }
++    if (file == INVALID_HANDLE_VALUE)
++        throw std::runtime_error("cannot create replacement temporary");
++    try {
++        size_t offset = 0;
++        while (offset < bytes.size()) {
++            DWORD written = 0;
++            const DWORD count =
++                static_cast<DWORD>(std::min<size_t>(bytes.size() - offset, 1u << 30));
++            if (!WriteFile(file, bytes.data() + offset, count, &written, nullptr) || written == 0)
++                throw std::system_error(
++                    GetLastError(),
++                    std::system_category(),
++                    "write replacement temporary");
++            offset += written;
++        }
++        if (!FlushFileBuffers(file))
++            throw std::system_error(
++                GetLastError(),
++                std::system_category(),
++                "flush replacement temporary");
++        const bool closed = CloseHandle(file);
++        file              = INVALID_HANDLE_VALUE;
++        if (!closed)
++            throw std::system_error(
++                GetLastError(),
++                std::system_category(),
++                "close replacement temporary");
++        if (!MoveFileExW(
++                temporary.c_str(),
++                path.c_str(),
++                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
++            throw std::system_error(GetLastError(), std::system_category(), "publish replacement");
++    } catch (...) {
++        if (file != INVALID_HANDLE_VALUE)
++            CloseHandle(file);
++        DeleteFileW(temporary.c_str());
++        throw;
++    }
++#else
++    int file = -1;
++    for (size_t attempt = 0; attempt < 128; ++attempt) {
++        temporary = path;
++        temporary +=
++            ".pending-" + std::to_string(getpid()) + "-" + std::to_string(sequence.fetch_add(1));
++        file = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
++        if (file >= 0)
++            break;
++        if (errno != EEXIST)
++            throw std::system_error(errno, std::generic_category(), "create replacement temporary");
++    }
++    if (file < 0)
++        throw std::runtime_error("cannot create replacement temporary");
++    try {
++        size_t offset = 0;
++        while (offset < bytes.size()) {
++            const auto count = ::write(
++                file,
++                bytes.data() + offset,
++                std::min<size_t>(bytes.size() - offset, 1u << 30));
++            if (count < 0 && errno == EINTR)
++                continue;
++            if (count <= 0)
++                throw std::system_error(
++                    count == 0 ? EIO : errno,
++                    std::generic_category(),
++                    "write replacement temporary");
++            offset += static_cast<size_t>(count);
++        }
++        if (::fsync(file) != 0)
++            throw std::system_error(errno, std::generic_category(), "flush replacement temporary");
++        const int closed = ::close(file);
++        file             = -1;
++        if (closed != 0)
++            throw std::system_error(errno, std::generic_category(), "close replacement temporary");
++        fs::rename(temporary, path);
++        const auto parent   = path.parent_path().empty() ? fs::path(".") : path.parent_path();
++        const int directory = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
++        if (directory < 0)
++            throw std::system_error(errno, std::generic_category(), "open replacement directory");
++        const int synced = ::fsync(directory), syncError = errno;
++        ::close(directory);
++        if (synced != 0)
++            throw std::system_error(
++                syncError,
++                std::generic_category(),
++                "flush replacement directory");
++    } catch (...) {
++        if (file >= 0)
++            ::close(file);
++        ::unlink(temporary.c_str());
++        throw;
++    }
++#endif
++}
++slot_t write(ArgsView &norm, bool atomic) {
++    const std::string path(norm.get<::String *>(0)->view());
++    const std::string bytes(norm.get<BytesObject *>(1)->view());
++    try {
++        const fs::path target(path);
++        if (!target.parent_path().empty())
++            fs::create_directories(target.parent_path());
++        if (atomic) {
++            atomicReplace(target, bytes);
++        } else {
++            std::ofstream file(target, std::ios::binary | std::ios::trunc);
++            file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
++            file.close();
++            if (!file)
++                throw std::runtime_error("cannot write the complete file");
++        }
++    } catch (const std::exception &error) {
++        systemFailure(atomic ? "fs.replace" : "fs.write_bytes", path, error.what());
++    }
++    return NullSlot;
++}
++} // namespace
++slot_t fsReadBytes(ArgsView &, ArgsView &norm, camel::core::context::Context &) {
++    const std::string path(norm.get<::String *>(0)->view());
++    std::ifstream file(path, std::ios::binary);
++    if (!file)
++        systemFailure("fs.read_bytes", path, "cannot open file");
++    const std::string bytes((std::istreambuf_iterator<char>(file)), {});
++    if (file.bad())
++        systemFailure("fs.read_bytes", path, "cannot read complete file");
++    return toSlot(BytesObject::from(bytes, camel::core::mm::autoSpace()));
++}
++slot_t fsWriteBytes(ArgsView &, ArgsView &norm, camel::core::context::Context &) {
++    return write(norm, false);
++}
++slot_t fsReplaceBytes(ArgsView &, ArgsView &norm, camel::core::context::Context &) {
++    return write(norm, true);
++}
+diff --git a/modules/fs/binary.h b/modules/fs/binary.h
+new file mode 100644
+index 00000000..5c32d9b4
+--- /dev/null
++++ b/modules/fs/binary.h
+@@ -0,0 +1,16 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Binary file kernels and crash-safe replacement, separate from text IO.
++#pragma once
++#include "camel/execute/executor.h"
++slot_t fsReadBytes(ArgsView &, ArgsView &, camel::core::context::Context &);
++slot_t fsWriteBytes(ArgsView &, ArgsView &, camel::core::context::Context &);
++slot_t fsReplaceBytes(ArgsView &, ArgsView &, camel::core::context::Context &);
+diff --git a/modules/fs/module.cpp b/modules/fs/module.cpp
+index 68dff883..12122dcd 100644
+--- a/modules/fs/module.cpp
++++ b/modules/fs/module.cpp
+@@ -1,9 +1,10 @@
+ #include "module.h"
+ #include "camel/core/context/context.h"
+ #include "camel/core/operator.h"
++#include "camel/core/operator_traits.h"
++#include "camel/core/type/bytes.h"
+ #include "camel/core/type/composite/tuple.h"
+ #include "camel/core/type/resolver.h"
+-#include "camel/core/operator_traits.h"
+ #include "executor.h"
+ 
+ using namespace camel::core::context;
+@@ -11,6 +12,23 @@ using namespace camel::core::module;
+ using namespace camel::core::type;
+ 
+ FsModule::FsModule(context_ptr_t ctx) : BuiltinModule("fs", ctx) {
++    exportType(Reference("Bytes"), BytesType::get());
++    exportEntity(
++        "read_bytes",
++        OperatorGroup::create(
++            "read_bytes",
++            {{"fs:read_bytes",
++              StaticFuncTypeResolver::create({}, {{Type::String(), false}}, BytesType::get())}}));
++    for (const std::string name : {"write_bytes", "replace"})
++        exportEntity(
++            name,
++            OperatorGroup::create(
++                name,
++                {{"fs:" + name,
++                  StaticFuncTypeResolver::create(
++                      {},
++                      {{Type::String(), false}, {BytesType::get(), false}},
++                      Type::Void())}}));
+     exportEntity(
+         "read_text",
+         OperatorGroup::create(
+@@ -69,7 +87,7 @@ FsModule::FsModule(context_ptr_t ctx) : BuiltinModule("fs", ctx) {
+               StaticFuncTypeResolver::create(
+                   {},
+                   {{Type::String(), false}, {Type::Int64(), false}, {Type::Int64(), false}},
+-                  Type::String())}}));
++                  BytesType::get())}}));
+     exportEntity(
+         "mkdir",
+         OperatorGroup::create(
+@@ -98,6 +116,9 @@ bool FsModule::load() {
+             {"read_text", false},
+             {"try_read_text", false},
+             {"read_chunk", false},
++            {"read_bytes", false},
++            {"write_bytes", false},
++            {"replace", false},
+             {"exists", false},
+             {"is_file", false},
+             {"is_dir", false},
+@@ -116,6 +137,9 @@ bool FsModule::load() {
+                 {"read_text", externalAmbient("fs", AccessMode::Read)},
+                 {"try_read_text", externalAmbient("fs", AccessMode::Read)},
+                 {"read_chunk", externalAmbient("fs", AccessMode::Read)},
++                {"read_bytes", externalAmbient("fs", AccessMode::Read)},
++                {"write_bytes", externalAmbient("fs", AccessMode::ReadModifyWrite)},
++                {"replace", externalAmbient("fs", AccessMode::ReadModifyWrite)},
+                 {"exists", externalAmbient("fs", AccessMode::Read)},
+                 {"is_file", externalAmbient("fs", AccessMode::Read)},
+                 {"is_dir", externalAmbient("fs", AccessMode::Read)},
+diff --git a/modules/fs/operators.cpp b/modules/fs/operators.cpp
+index ab81cd70..cbcaada1 100644
+--- a/modules/fs/operators.cpp
++++ b/modules/fs/operators.cpp
+@@ -18,10 +18,12 @@
+  */
+ 
+ #include "operators.h"
++#include "binary.h"
+ #include "camel/core/context/context.h"
+ #include "camel/core/error/runtime.h"
+ #include "camel/core/operator.h"
+ #include "camel/core/rtdata/base.h"
++#include "camel/core/rtdata/bytes.h"
+ #include "camel/core/rtdata/string.h"
+ #include "camel/core/rtdata/tagged.h"
+ 
+@@ -76,9 +78,8 @@ std::string openFailureReason(int code) {
+ 
+ } // namespace
+ 
+-// Files are opened in binary mode: what is written is the bytes of the string and what is read
+-// is the bytes of the file, on every platform. (In text mode the C runtime of Windows writes
+-// "\r\n" for every "\n", so file_size differed from the length of what was written.)
++// Text is UTF-8. Binary mode preserves its exact line endings on every platform;
++// arbitrary binary content belongs to read_bytes/write_bytes instead.
+ slot_t __fs_read_text__(ArgsView &with, ArgsView &norm, Context &ctx) {
+     String *path = norm.get<String *>(0);
+     errno        = 0;
+@@ -92,7 +93,19 @@ slot_t __fs_read_text__(ArgsView &with, ArgsView &norm, Context &ctx) {
+     }
+     std::ostringstream oss;
+     oss << f.rdbuf();
+-    return toSlot(String::from(oss.str(), mm::autoSpace()));
++    if (f.bad())
++        throwRuntimeFault(
++            RuntimeDiag::FileSystemError,
++            "fs.read_text",
++            std::string(path->view()),
++            "cannot read complete file");
++    const auto text = oss.str();
++    if (const auto bad = invalidUtf8Offset(text))
++        throwRuntimeFault(
++            RuntimeDiag::InvalidArgument,
++            "fs.read_text",
++            "invalid UTF-8 at byte " + std::to_string(*bad) + "; use read_bytes for binary data");
++    return toSlot(String::from(text, mm::autoSpace()));
+ }
+ 
+ slot_t __fs_try_read_text__(ArgsView &with, ArgsView &norm, Context &ctx) {
+@@ -113,12 +126,23 @@ slot_t __fs_try_read_text__(ArgsView &with, ArgsView &norm, Context &ctx) {
+     if (f.bad()) {
+         return makeError("IOError", "cannot read '" + name + "'", "<fs::try_read_text>");
+     }
+-    return makeOk(toSlot(String::from(oss.str(), mm::autoSpace())), resultType);
++    const auto text = oss.str();
++    if (const auto bad = invalidUtf8Offset(text))
++        return makeError(
++            "EncodingError",
++            "invalid UTF-8 at byte " + std::to_string(*bad),
++            "<fs::try_read_text>");
++    return makeOk(toSlot(String::from(text, mm::autoSpace())), resultType);
+ }
+ 
+ slot_t __fs_write_text__(ArgsView &with, ArgsView &norm, Context &ctx) {
+     String *path    = norm.get<String *>(0);
+     String *content = norm.get<String *>(1);
++    if (const auto bad = invalidUtf8Offset(content->view()))
++        throwRuntimeFault(
++            RuntimeDiag::InvalidArgument,
++            "fs.write_text",
++            "invalid UTF-8 at byte " + std::to_string(*bad) + "; use write_bytes for binary data");
+     fs_impl::path p(path->c_str());
+     auto parent = p.parent_path();
+     if (!parent.empty() && !fs_impl::exists(parent)) {
+@@ -140,7 +164,7 @@ slot_t __fs_write_text__(ArgsView &with, ArgsView &norm, Context &ctx) {
+             std::string(path->c_str()),
+             openFailureReason(errno));
+     }
+-    // Camel strings carry a byte length and may contain NUL (for example PGM pixels).
++    // UTF-8 permits NUL; use the stored length, never C-string termination.
+     f.write(content->c_str(), static_cast<std::streamsize>(content->size()));
+     f.close();
+     if (!f) {
+@@ -216,7 +240,7 @@ slot_t __fs_read_chunk__(ArgsView &with, ArgsView &norm, Context &ctx) {
+             "the size of the file cannot be determined");
+     }
+     if (offset >= fileSize || size == 0) {
+-        return toSlot(String::from("", mm::autoSpace()));
++        return toSlot(BytesObject::from("", mm::autoSpace()));
+     }
+ 
+     std::streamoff remaining = fileSize - static_cast<std::streamoff>(offset);
+@@ -227,7 +251,13 @@ slot_t __fs_read_chunk__(ArgsView &with, ArgsView &norm, Context &ctx) {
+     f.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+     f.read(buffer.data(), toRead);
+     buffer.resize(static_cast<size_t>(f.gcount()));
+-    return toSlot(String::from(buffer, mm::autoSpace()));
++    if (f.bad())
++        throwRuntimeFault(
++            RuntimeDiag::FileSystemError,
++            "fs.read_chunk",
++            std::string(path->view()),
++            "cannot read complete chunk");
++    return toSlot(BytesObject::from(buffer, mm::autoSpace()));
+ }
+ 
+ slot_t __fs_mkdir__(ArgsView &with, ArgsView &norm, Context &ctx) {
+@@ -260,6 +290,9 @@ slot_t __fs_mkdirs__(ArgsView &with, ArgsView &norm, Context &ctx) {
+ 
+ std::unordered_map<std::string, operator_t> getFsOpsMap() {
+     return {
++        {"read_bytes", fsReadBytes},
++        {"write_bytes", fsWriteBytes},
++        {"replace", fsReplaceBytes},
+         {"read_text", __fs_read_text__},
+         {"try_read_text", __fs_try_read_text__},
+         {"write_text", __fs_write_text__},
+diff --git a/scripts/stdlib-reference.mjs b/scripts/stdlib-reference.mjs
+index befb0490..95f888b4 100644
+--- a/scripts/stdlib-reference.mjs
++++ b/scripts/stdlib-reference.mjs
+@@ -50,6 +50,7 @@ const PROBE = path.join(REPO_ROOT, 'test', 'cases', 'modules', 'stdlib', 'regist
+ const MODULES = [
+     { name: 'globals', title: 'Built-in functions', registered: '<builtin>', kind: 'cpp' },
+     { name: 'str', title: '`str`: strings', kind: 'cpp' },
++    { name: 'bytes', title: '`bytes`: immutable binary values and UTF-8 conversion', kind: 'cpp' },
+     { name: 'array', title: '`array`: arrays and higher-order functions', kind: 'camel' },
+     { name: 'math', title: '`math`: numbers and bits', kind: 'cpp' },
+     { name: 'statistics', title: '`statistics`', kind: 'cpp' },
+diff --git a/src/core/rtdata/bytes.cpp b/src/core/rtdata/bytes.cpp
+new file mode 100644
+index 00000000..a70a35aa
+--- /dev/null
++++ b/src/core/rtdata/bytes.cpp
+@@ -0,0 +1,82 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Binary values preserve embedded NULs; text decoding rejects malformed Unicode.
++#include "camel/core/rtdata/bytes.h"
++#include <cstring>
++#include <limits>
++#include <ostream>
++namespace camel::core::rtdata {
++BytesObject::BytesObject(size_t length) : length_(length) {}
++BytesObject *BytesObject::from(std::string_view bytes, mm::IAllocator &allocator) {
++    if (bytes.size() > std::numeric_limits<size_t>::max() - sizeof(BytesObject))
++        throw std::length_error("Bytes allocation size overflow");
++    auto *memory = allocator.alloc(sizeof(BytesObject) + bytes.size(), alignof(BytesObject));
++    if (!memory)
++        throw std::bad_alloc();
++    auto *out = new (memory) BytesObject(bytes.size());
++    if (!bytes.empty())
++        std::memcpy(out->data_, bytes.data(), bytes.size());
++    return out;
++}
++std::string_view BytesObject::view() const { return {data_, length_}; }
++size_t BytesObject::size() const { return length_; }
++bool BytesObject::equals(const Object *other, const type::Type *, bool) const {
++    return isOfSameCls(this, other) && view() == static_cast<const BytesObject *>(other)->view();
++}
++Object *BytesObject::clone(mm::IAllocator &allocator, const type::Type *, bool) const {
++    // Snapshot before allocating: the source may move at an allocation safepoint.
++    const std::string copy(view());
++    return from(copy, allocator);
++}
++void BytesObject::print(std::ostream &os, const type::Type *) const {
++    constexpr char hex[] = "0123456789abcdef";
++    os << "Bytes[";
++    for (size_t i = 0; i < length_; ++i) {
++        if (i)
++            os << ' ';
++        const auto byte = static_cast<unsigned char>(data_[i]);
++        os << hex[byte >> 4] << hex[byte & 15];
++    }
++    os << ']';
++}
++void BytesObject::onMoved() {}
++void BytesObject::updateRefs(const RefRelocator &, const type::Type *) {}
++std::optional<size_t> invalidUtf8Offset(std::string_view bytes) {
++    size_t i = 0;
++    while (i < bytes.size()) {
++        const size_t start = i;
++        const auto first   = static_cast<unsigned char>(bytes[i++]);
++        if (first < 0x80)
++            continue;
++        size_t count;
++        uint32_t value, least;
++        if (first >= 0xc2 && first <= 0xdf)
++            count = 1, value = first & 31, least = 0x80;
++        else if (first >= 0xe0 && first <= 0xef)
++            count = 2, value = first & 15, least = 0x800;
++        else if (first >= 0xf0 && first <= 0xf4)
++            count = 3, value = first & 7, least = 0x10000;
++        else
++            return start;
++        if (count > bytes.size() - i)
++            return start;
++        for (size_t j = 0; j < count; ++j) {
++            const auto next = static_cast<unsigned char>(bytes[i++]);
++            if ((next & 0xc0) != 0x80)
++                return start;
++            value = (value << 6) | (next & 63);
++        }
++        if (value < least || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff))
++            return start;
++    }
++    return std::nullopt;
++}
++} // namespace camel::core::rtdata
+diff --git a/src/core/type/bytes.cpp b/src/core/type/bytes.cpp
+new file mode 100644
+index 00000000..7af581cb
+--- /dev/null
++++ b/src/core/type/bytes.cpp
+@@ -0,0 +1,37 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Bytes is nominal and cannot be confused with a UTF-8 String or an integer array.
++#include "camel/core/type/bytes.h"
++#include "camel/core/mm.h"
++namespace camel::core::type {
++BytesType::BytesType() : OtherType(typeCode()) {}
++TypeCode BytesType::typeCode() {
++    static auto code = registerOtherType("Bytes", TypeFlag::GC_Traced);
++    return code;
++}
++BytesType *BytesType::get() {
++    static auto *type =
++        new (mm::permSpace().alloc(sizeof(BytesType), alignof(BytesType))) BytesType();
++    return type;
++}
++std::string BytesType::toString() const { return "Bytes"; }
++std::string BytesType::mangle() const { return "Bytes"; }
++Type *BytesType::clone(bool) const { return get(); }
++bool BytesType::equals(Type *other) const { return isBytesType(other); }
++bool BytesType::assignableFrom(Type *other) const { return isBytesType(other); }
++CastSafety BytesType::castSafetyFrom(Type *other) const {
++    return isBytesType(other) ? CastSafety::Safe : CastSafety::Forbidden;
++}
++OtherType *BytesType::cloneWithParams(std::span<Type *const> params) const {
++    return params.empty() ? get() : nullptr;
++}
++bool isBytesType(const Type *type) { return type && type->code() == BytesType::typeCode(); }
++} // namespace camel::core::type
+diff --git a/stdlib/signatures/bytes.cml b/stdlib/signatures/bytes.cml
+new file mode 100644
+index 00000000..dff523ff
+--- /dev/null
++++ b/stdlib/signatures/bytes.cml
+@@ -0,0 +1,45 @@
++// Signatures of the binary value module; these declarations are reference metadata.
++
++/// Encodes valid UTF-8 text as an immutable Bytes value.
++/// @pure
++/// @fails fault `InvalidArgument` when legacy string content is malformed UTF-8
++/// @example encode('hello')
++inner func encode(text: string): Bytes {
++    return 'bytes:encode'
++}
++
++/// Decodes UTF-8, returning an EncodingError value for malformed input.
++/// @pure
++/// @example decode(encode('中文')) !! ''
++inner func decode(content: Bytes): string! {
++    return 'bytes:decode'
++}
++
++/// Copies integers in the inclusive range 0..255 into a binary value.
++/// @pure
++/// @fails fault `InvalidArgument` for an element outside 0..255
++/// @example from_array([0, 128, 255])
++inner func from_array(values: int[]): Bytes {
++    return 'bytes:from_array'
++}
++
++/// Copies each byte into an integer array.
++/// @pure
++/// @example to_array(encode('AB'))    // [65, 66]
++inner func to_array(content: Bytes): int[] {
++    return 'bytes:to_array'
++}
++
++/// The number of bytes in the binary value.
++/// @pure
++/// @example size(encode('abc'))    // 3
++inner func size(content: Bytes): int {
++    return 'bytes:size'
++}
++
++/// Concatenates two binary values without decoding either one.
++/// @pure
++/// @example concat(encode('header'), from_array([0, 255]))
++inner func concat(left: Bytes, right: Bytes): Bytes {
++    return 'bytes:concat'
++}
+diff --git a/stdlib/signatures/crypto.cml b/stdlib/signatures/crypto.cml
+index 5074c1df..01182123 100644
+--- a/stdlib/signatures/crypto.cml
++++ b/stdlib/signatures/crypto.cml
+@@ -12,6 +12,9 @@
+ inner func sha256(s: string): string {
+     return 'crypto:sha256'
+ }
++inner func sha256(s: Bytes): string {
++    return 'crypto:sha256'
++}
+ 
+ /// SHA-256 applied rounds times, each round to the hexadecimal text of the one before;
+ /// 0 rounds gives s itself.
+diff --git a/stdlib/signatures/fs.cml b/stdlib/signatures/fs.cml
+index 9164631d..7544066e 100644
+--- a/stdlib/signatures/fs.cml
++++ b/stdlib/signatures/fs.cml
+@@ -11,7 +11,7 @@
+ 
+ /// The whole content of the file.
+ /// @effect reads a file
+-/// @fails fault `FileOpenFailed` when the file cannot be opened; use try_read_text to handle that in the program
++/// @fails fault `FileOpenFailed` when the file cannot be opened; fault `InvalidArgument` for malformed UTF-8; use read_bytes for binary files
+ /// @example read_text('notes.txt')    // the text of the file
+ inner func read_text(path: string): string {
+     return 'fs:read_text'
+@@ -19,7 +19,7 @@ inner func read_text(path: string): string {
+ 
+ /// The whole content of the file, or an error value.
+ /// @effect reads a file
+-/// @fails error `IOError` when the path is a directory, or the file cannot be opened or read
++/// @fails error `IOError` when the path is a directory, or the file cannot be opened or read; error `EncodingError` for malformed UTF-8
+ /// @example try_read_text('notes.txt') !! ''    // the text, or '' when it cannot be read
+ inner func try_read_text(path: string): string! {
+     return 'fs:try_read_text'
+@@ -29,13 +29,34 @@ inner func try_read_text(path: string): string! {
+ /// @effect reads a file
+ /// @fails fault `InvalidArgument` when offset or size is negative; fault `FileOpenFailed` or `FileSystemError` when the file cannot be opened or read
+ /// @example read_chunk('notes.txt', 0, 16)    // the first 16 bytes
+-inner func read_chunk(path: string, offset: int, size: int): string {
++inner func read_chunk(path: string, offset: int, size: int): Bytes {
+     return 'fs:read_chunk'
+ }
+ 
++/// The complete binary content, preserving every byte.
++/// @effect reads a file
++/// @example read_bytes('pixels.bin')
++inner func read_bytes(path: string): Bytes {
++    return 'fs:read_bytes'
++}
++
++/// Writes binary content, creating parent directories when needed.
++/// @effect writes a file
++/// @example write_bytes('pixels.bin', payload)
++inner func write_bytes(path: string, content: Bytes): void {
++    return 'fs:write_bytes'
++}
++
++/// Flushes a temporary in the same directory and atomically replaces the destination.
++/// @effect writes and replaces a file
++/// @example replace('checkpoint.bin', payload)
++inner func replace(path: string, content: Bytes): void {
++    return 'fs:replace'
++}
++
+ /// Replaces the content of the file, creating it and its parent directories when needed.
+ /// @effect writes a file
+-/// @fails fault `FileSystemError` when a directory cannot be created; fault `FileOpenFailed` when the file cannot be opened
++/// @fails fault `FileSystemError` when a directory cannot be created; fault `FileOpenFailed` when the file cannot be opened; fault `InvalidArgument` for malformed UTF-8
+ /// @example write_text('out/log.txt', 'done')
+ inner func write_text(path: string, content: string): void {
+     return 'fs:write_text'
+diff --git a/test/cases/modules/bytes_text_reject.cml b/test/cases/modules/bytes_text_reject.cml
+new file mode 100644
+index 00000000..b2b37ef8
+--- /dev/null
++++ b/test/cases/modules/bytes_text_reject.cml
+@@ -0,0 +1,10 @@
++module bytes_text_reject
++import { from_array } from bytes
++import { write_bytes, read_text } from fs
++import { get_env } from sys
++func main(): int sync {
++    let path = get_env('TEMP') + '/camel-bytes-invalid-text.bin'
++    write_bytes(path, from_array([255]))
++    println(read_text(path))
++    return 0
++}
+diff --git a/test/cases/modules/bytes_values.cml b/test/cases/modules/bytes_values.cml
+new file mode 100644
+index 00000000..25569966
+--- /dev/null
++++ b/test/cases/modules/bytes_values.cml
+@@ -0,0 +1,26 @@
++module bytes_values
++import { Bytes, from_array, to_array, encode, decode, size, concat } from bytes
++import { read_bytes, write_bytes, read_chunk, replace, file_size } from fs
++import { sha256 } from crypto
++import { get_env } from sys
++import { tree_map } from tree
++func count(b: Bytes): int { return size(b) }
++func main(): int sync {
++    let path = get_env('TEMP') + '/camel-bytes-values.bin'
++    let binary = from_array([0, 65, 0, 255, 13, 10, 128, 0])
++    write_bytes(path, binary)
++    println(to_array(read_bytes(path)))
++    println(to_array(read_chunk(path, 1, 6)))
++    println(size(read_chunk(path, 100, 4)))
++    println(sha256(read_bytes(path)))
++    println(decode(from_array([255])) !! 'invalid UTF-8')
++    println(decode(encode('中文 UTF-8')) !! 'unexpected decode failure')
++    println(to_array(encode(decode(from_array([65, 0, 66])) !! '')))
++    replace(path, concat(encode('ok:'), binary))
++    println(file_size(path))
++    println(to_array(read_bytes(path)))
++    println(tree_map<count>({ raw: binary, more: (encode('abc'), binary) }))
++    replace(path, from_array(range(0, 0)))
++    println(file_size(path))
++    return 0
++}
+diff --git a/test/cases/modules/fs_binary_roundtrip.cml b/test/cases/modules/fs_binary_roundtrip.cml
+index 834ccb5c..7cf4fd41 100644
+--- a/test/cases/modules/fs_binary_roundtrip.cml
++++ b/test/cases/modules/fs_binary_roundtrip.cml
+@@ -1,14 +1,14 @@
+ // Embedded NUL and high bytes must survive the binary-mode file APIs.
+ module fs_binary_roundtrip
+-import { write_text, read_text, read_chunk, file_size } from fs
+-import { bytes, from_bytes } from str
++import { write_bytes, read_bytes, read_chunk, file_size } from fs
++import { to_array, from_array } from bytes
+ import { get_env } from sys
+ func main(): int sync {
+     let path = get_env('TEMP') + '/camel-fs-binary-roundtrip.bin'
+-    let payload = from_bytes([0, 65, 0, 255, 13, 10, 128, 0])
+-    write_text(path, payload)
+-    let whole = bytes(read_text(path))
+-    let middle = bytes(read_chunk(path, 1, 6))
++    let payload = from_array([0, 65, 0, 255, 13, 10, 128, 0])
++    write_bytes(path, payload)
++    let whole = to_array(read_bytes(path))
++    let middle = to_array(read_chunk(path, 1, 6))
+     println('binary size={} whole={} middle={}'->format<file_size(path), whole, middle>)
+     return if file_size(path) == 8 && len(whole) == 8 && len(middle) == 6 then 0 else 1
+ }
+diff --git a/test/cases/modules/std/fs/basic.cml b/test/cases/modules/std/fs/basic.cml
+index 88a081d7..137201e4 100644
+--- a/test/cases/modules/std/fs/basic.cml
++++ b/test/cases/modules/std/fs/basic.cml
+@@ -4,6 +4,7 @@
+ module main
+ 
+ import { exists, is_file, is_dir, mkdir, mkdirs, read_text, write_text, file_size, read_chunk } from fs
++import { decode } from bytes
+ 
+ func main(): int sync {
+     println("=== FS Module Basic Tests ===")
+@@ -32,7 +33,7 @@ func main(): int sync {
+     println("  size =", file_size(path))
+ 
+     println("[10] read_chunk(path, 0, 5)")
+-    println("  chunk =", read_chunk(path, 0, 5))
++    println("  chunk =", decode(read_chunk(path, 0, 5)) !! '')
+ 
+     println("\n=== FS tests completed ===")
+     return 0
+diff --git a/test/cases/modules/stdlib/registry_all.cml b/test/cases/modules/stdlib/registry_all.cml
+index 49fb7228..08f53c4f 100644
+--- a/test/cases/modules/stdlib/registry_all.cml
++++ b/test/cases/modules/stdlib/registry_all.cml
+@@ -5,6 +5,7 @@
+ module registry_all
+ 
+ import algo
++import bytes
+ import crypto
+ import fs
+ import io
+diff --git a/test/cases/para/core/file_chunk_hash.cml b/test/cases/para/core/file_chunk_hash.cml
+index 1a30cd8d..a1127168 100644
+--- a/test/cases/para/core/file_chunk_hash.cml
++++ b/test/cases/para/core/file_chunk_hash.cml
+@@ -9,7 +9,7 @@ import { sha256, sha256_rounds } from crypto
+ 
+ func digest_chunk(path: string, offset: int, size: int): string sync {
+     let block = read_chunk(path, offset, size)
+-    return sha256_rounds(block, 2048)
++    return sha256_rounds(sha256(block), 2047)
+ }
+ 
+ func main(): int sync {
+diff --git a/test/plans/feat/modules/bytes.plan.toml b/test/plans/feat/modules/bytes.plan.toml
+new file mode 100644
+index 00000000..19686969
+--- /dev/null
++++ b/test/plans/feat/modules/bytes.plan.toml
+@@ -0,0 +1,22 @@
++id = "modules.bytes"
++order = 369
++tier = "feat"
++tags = ["feat", "modules", "bytes"]
++
++[[tests]]
++name = "binary_io_decoding_and_atomic_replace"
++kind = "behavior"
++case = "../../../cases/modules/bytes_values.cml"
++args = ["${case}", "std::macro", "std::nvm"]
++expect_exit = 0
++expect_stdout_exact = "[0, 65, 0, 255, 13, 10, 128, 0]\n[65, 0, 255, 13, 10, 128]\n0\n26aa5dd8eb311cb23d596c9ecb8cd1d959e3215033223177ee68a40f3ac4e2f0\ninvalid UTF-8\n中文 UTF-8\n[65, 0, 66]\n11\n[111, 107, 58, 0, 65, 0, 255, 13, 10, 128, 0]\n{ raw: 8, more: (3, 8) }\n0\n"
++timeout_ms = 10000
++
++[[tests]]
++name = "text_reader_rejects_binary_content"
++kind = "negative"
++case = "../../../cases/modules/bytes_text_reject.cml"
++args = ["${case}", "std::nvm"]
++expect_exit = 1
++expect_output_contains = ["invalid UTF-8 at byte 0", "use read_bytes for binary data"]
++timeout_ms = 10000
+-- 
+2.51.0.windows.1
+

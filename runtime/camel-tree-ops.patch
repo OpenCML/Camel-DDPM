@@ -1,0 +1,662 @@
+From 23d97db76a58a72318ea9df413179dab14df2984 Mon Sep 17 00:00:00 2001
+From: Zhenjie Wei <Kogler_S@outlook.com>
+Date: Sun, 18 Oct 2026 23:50:42 +0800
+Subject: [PATCH 1/2] feat: expand type-directed parameter tree operations into
+ ordinary graphs
+
+---
+ CMakeLists.txt                            |   1 +
+ docs/design/training/implementation.cn.md |   2 +-
+ docs/design/training/tree.cn.md           |  16 ++
+ modules/tree/CMakeLists.txt               |   2 +
+ modules/tree/module.cpp                   |  60 ++++++
+ src/compile/gir/builder.cpp               |  11 +-
+ src/compile/gir/builder.h                 |  37 ++--
+ src/compile/gir/tree.cpp                  | 236 ++++++++++++++++++++++
+ test/cases/modules/tree_operations.cml    |  21 ++
+ test/cases/modules/tree_shape_error.cml   |   6 +
+ test/cases/modules/tree_training.cml      |  34 ++++
+ test/plans/feat/modules/tree.plan.toml    |  22 ++
+ test/plans/gpu/tiles_transfer.plan.toml   |   9 +
+ 13 files changed, 440 insertions(+), 17 deletions(-)
+ create mode 100644 docs/design/training/tree.cn.md
+ create mode 100644 modules/tree/CMakeLists.txt
+ create mode 100644 modules/tree/module.cpp
+ create mode 100644 src/compile/gir/tree.cpp
+ create mode 100644 test/cases/modules/tree_operations.cml
+ create mode 100644 test/cases/modules/tree_shape_error.cml
+ create mode 100644 test/cases/modules/tree_training.cml
+ create mode 100644 test/plans/feat/modules/tree.plan.toml
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fcd677d7..01a38e4c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -178,6 +178,7 @@ add_subdirectory(modules/tensor)
+ add_subdirectory(modules/tiles)
+ add_subdirectory(modules/nn)
+ add_subdirectory(modules/autodiff)
++add_subdirectory(modules/tree)
+ add_subdirectory(modules/onnx)
+ 
+ # CLI and tools: link the libcamel shell (camel-cli lives under tools).
+diff --git a/docs/design/training/implementation.cn.md b/docs/design/training/implementation.cn.md
+index 051f4f58..67b88417 100644
+--- a/docs/design/training/implementation.cn.md
++++ b/docs/design/training/implementation.cn.md
+@@ -26,6 +26,6 @@ DDPM 项目新增 `examples/device-tree-step.cml`，在真实的已封存图像
+ 
+ ## 尚未完成
+ 
+-第一阶段尚未完成：`std::tree` 的编译期展开、`Bytes` 与文件接口、原生树检查点仍需实现。DDPM 的参数生成器因此暂未删除。设备随机数、完整常驻训练步、传输统计、真正的 bf16 存储、重计算、耐久性与四卡训练继续按设计阶段推进；先前的 NCCL 草稿已独立暂存，不作为可用功能。
++`std::tree` 已按作者修订完成编译期展开，见 [参数树实现](tree.cn.md)。第一阶段的 `Bytes` 与文件接口、原生树检查点及 DDPM 迁移继续推进。设备随机数、完整常驻训练步、传输统计、真正的 bf16 存储、重计算、耐久性与四卡训练继续按设计阶段推进；先前的 NCCL 草稿已独立暂存，不作为可用功能。
+ 
+ 手动运行还暴露了已有的声明类型问题：`let p: Model = { ...带具体形状的张量... }` 通过结构可赋值检查后，又因结构体的显式转换只接受相同类型而被拒绝。当前示例通过返回类型为 `Model` 的初始化函数构造参数。该缺陷尚未修复；不能为通过测试而修改显式转换的既定语义。
+diff --git a/docs/design/training/tree.cn.md b/docs/design/training/tree.cn.md
+new file mode 100644
+index 00000000..c0570d80
+--- /dev/null
++++ b/docs/design/training/tree.cn.md
+@@ -0,0 +1,16 @@
++# 参数树实现
++
++2026-10-18，按设计稿 3.2、3.5 的修订实现。所有操作在 GIR 建图时展开，交给原有的字段访问、调用、构造及后续自动微分处理，不增加运行时树遍历。
++
++- `tree_map<f>(t1, ..., tn)` 只按 `t1` 的结构体和普通元组递归。其他实参在对应内部节点必须有同样的字段顺序和结构；在第一棵树的叶子位置整体传入，即使该位置是结构体或元组。
++- 回调调用复用普通调用的泛型实例化、重载选择、闭包捕获、可变参数检查和效应记录。不会根据回调的参数类型改变叶子边界。
++- `tree_unzip(r, like)` 根据 `like` 的边界取出各叶子的元组分量，再构造结果树。各叶子元组的元数必须一致；空参照树不能确定元数，给出明确诊断。
++- `tree_reduce<op>(t, init)` 依字段声明顺序深度优先展开为有数据依赖的左折叠；回调必须保持累加器的类型。
++- `tree_leaves(t)` 返回规范顺序的叶子元组；`tree_paths(t)` 返回同构的路径字符串树。根本身为叶子时路径为空字符串。
++- 数组、映射和其他模块类型作为叶子；可空、可失败包装与可变单元不按普通元组展开。
++
++服务器手动运行 `tree_operations.cml`，覆盖多树映射、泛型与重载回调、回调元组返回、以第一棵树为准停止展开、数组叶子、路径和叶子顺序，以及浮点 `((0 + 1e16) + -1e16) + 1 = 1` 的左折叠。`tree_shape_error.cml` 在编译期指出第一个不匹配位置 `block`。
++
++`tree_training.cml` 在物理 GPU 2 上以 `std::macro std::fvm` 手动执行：含树操作的损失完成自动微分；通用更新函数通过 `tree_map` 返回元组，再以 `tree_unzip` 拆成设备参数树。五项 CPU/GPU 损失、梯度及更新误差都是零。
++
++这些手动结果随后登记为计划条目，没有运行全量回归。DDPM 的通用优化器和实际训练验收见实现进度文档；原生检查点与其他训练基础设施仍按设计稿继续推进。
+diff --git a/modules/tree/CMakeLists.txt b/modules/tree/CMakeLists.txt
+new file mode 100644
+index 00000000..0399da8a
+--- /dev/null
++++ b/modules/tree/CMakeLists.txt
+@@ -0,0 +1,2 @@
++include(${CMAKE_CURRENT_SOURCE_DIR}/../camel_module.cmake)
++add_camel_module(NAME tree SOURCES module.cpp)
+diff --git a/modules/tree/module.cpp b/modules/tree/module.cpp
+new file mode 100644
+index 00000000..5ee418dd
+--- /dev/null
++++ b/modules/tree/module.cpp
+@@ -0,0 +1,60 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Public names for type-directed intrinsics; the compiler emits ordinary graph nodes.
++#include "camel/core/context/context.h"
++#include "camel/core/module/builtin.h"
++#include "camel/core/operator_traits.h"
++#include "camel/core/type/resolver.h"
++
++namespace {
++using namespace camel::core::type;
++using namespace camel::core::module;
++using namespace camel::core::context;
++class TreeResolver final : public FuncTypeResolver {
++  public:
++    explicit TreeResolver(std::string name) : name_(std::move(name)) {}
++    std::optional<FunctionType *>
++    resolve(const type_vec_t &, const type_vec_t &, const ModifierSet &) const override {
++        return std::nullopt; // The compiler resolves callbacks separately for each leaf.
++    }
++    std::string signature() const override { return name_ + " (type-directed tree intrinsic)"; }
++
++  private:
++    std::string name_;
++};
++class TreeModule final : public BuiltinModule {
++  public:
++    explicit TreeModule(context_ptr_t ctx) : BuiltinModule("tree", std::move(ctx)) {
++        for (const std::string name :
++             {"tree_map", "tree_reduce", "tree_unzip", "tree_leaves", "tree_paths"}) {
++            exportEntity(
++                name,
++                OperatorGroup::create(
++                    name,
++                    {{"tree:" + name, std::make_shared<TreeResolver>(name)}}));
++        }
++    }
++    bool load() override {
++        camel::core::OperatorTable::instance().declare(
++            "tree",
++            {{"tree_map", false},
++             {"tree_reduce", false},
++             {"tree_unzip", true},
++             {"tree_leaves", true},
++             {"tree_paths", true}});
++        loaded_ = true;
++        return true;
++    }
++};
++} // namespace
++extern "C" Module *camel_module_create(Context *ctx) {
++    return new TreeModule(ctx->shared_from_this());
++}
+diff --git a/src/compile/gir/builder.cpp b/src/compile/gir/builder.cpp
+index c5fa18dc..caa27979 100644
+--- a/src/compile/gir/builder.cpp
++++ b/src/compile/gir/builder.cpp
+@@ -13,7 +13,7 @@
+  *
+  * Author: Zhenjie Wei
+  * Created: Aug. 17, 2024
+- * Updated: Oct. 16, 2026
++ * Updated: Oct. 18, 2026
+  * Supported by: National Key Research and Development Program of China
+  */
+ 
+@@ -5653,6 +5653,10 @@ node_handle_t Builder::visitLinkNode(const GCT::node_ptr_t &gct) {
+             }
+         } else if (std::holds_alternative<oper_group_ptr_t>(drefTarget)) {
+             auto ops = std::get<oper_group_ptr_t>(drefTarget);
++            if (auto expanded = expandTreeCall(ops, withInputs, normInputs, gct)) {
++                LEAVE("LINK");
++                return expanded;
++            }
+             settleGenericOperatorArguments(
+                 ops,
+                 withInputs,
+@@ -6199,6 +6203,11 @@ std::string Builder::bindTemporary(node_handle_t node) {
+     return name;
+ }
+ 
++void Builder::registerTreeOrigin(
++    node_handle_t node, const GCT::node_ptr_t &origin, const char *kind) {
++    registerNodeOrigin(context_, node, origin, kind);
++}
++
+ node_handle_t
+ Builder::applyTagOperator(const char *op, const std::string &name, const GCT::node_ptr_t &origin) {
+     // An ordinary call, built from a synthesized GCT so that capturing the operand from an
+diff --git a/src/compile/gir/builder.h b/src/compile/gir/builder.h
+index afaabf57..0da96707 100644
+--- a/src/compile/gir/builder.h
++++ b/src/compile/gir/builder.h
+@@ -13,7 +13,7 @@
+  *
+  * Author: Zhenjie Wei
+  * Created: May. 29, 2024
+- * Updated: Oct. 13, 2026
++ * Updated: Oct. 18, 2026
+  * Supported by: National Key Research and Development Program of China
+  */
+ 
+@@ -619,6 +619,11 @@ class Builder {
+         const oper_group_ptr_t &ops, std::vector<Argument> &withInputs,
+         std::vector<Argument> &normInputs, camel::core::type::type_vec_t &withTypes,
+         camel::core::type::type_vec_t &normTypes, const GCT::node_ptr_t &call);
++    // Type-directed tree intrinsics expand to ordinary accesses, calls and fills.
++    node_handle_t expandTreeCall(
++        const oper_group_ptr_t &ops, const std::vector<Argument> &with,
++        const std::vector<Argument> &norm, const GCT::node_ptr_t &call);
++    void registerTreeOrigin(node_handle_t node, const GCT::node_ptr_t &origin, const char *kind);
+     compile_graph_ptr_t instantiateGeneric(
+         const template_ptr_t &tmpl, const camel::core::type::type_bindings_t &bindings,
+         const GCT::node_ptr_t &call);
+@@ -723,12 +728,13 @@ class Builder {
+     // A function with the parameters of the operator `op` that calls it: what a library
+     // operator named as a value (`xs->map<trim>`) stands for. Null when the operator has no
+     // such function (it changes an argument in place).
+-    compile_graph_ptr_t operatorValueGraphOf(const oper_idx_ptr_t &op, const GCT::node_ptr_t &origin);
++    compile_graph_ptr_t
++    operatorValueGraphOf(const oper_idx_ptr_t &op, const GCT::node_ptr_t &origin);
+     // The one function of the name `node` (a DREF to several overloads or to an operator
+     // group) that has exactly the parameters and the result of `expected`, as a value; null
+     // when none or several do.
+-    node_handle_t overloadValueFor(
+-        node_handle_t node, FunctionType *expected, const GCT::node_ptr_t &origin);
++    node_handle_t
++    overloadValueFor(node_handle_t node, FunctionType *expected, const GCT::node_ptr_t &origin);
+     // A function with the declared parameters of `target` that captures the names `target`
+     // captured and calls it with them: what a function value of `target` refers to once the
+     // captures of `target` have become with-parameters (createFuncDataNode).
+@@ -754,8 +760,8 @@ class Builder {
+     /// An error at `call` when the conversion `group` (`int`, `i32`, `float`, ...) is given
+     /// a literal that does not fit the type (LiteralOutOfRange, LiteralStaticCastFailed).
+     void rejectLiteralConversion(
+-        const std::string &group, FunctionType *funcType,
+-        const std::vector<Argument> &operands, const GCT::node_ptr_t &call);
++        const std::string &group, FunctionType *funcType, const std::vector<Argument> &operands,
++        const GCT::node_ptr_t &call);
+     /// An error at `origin` when `node` still carries `with` arguments no partial
+     /// application could be made of (PartialApplicationRefused): the binding is never
+     /// dropped without a word.
+@@ -873,8 +879,8 @@ class Builder {
+     void requireMatchDefault(const GCT::node_ptr_t &gct, node_handle_t scrutinee);
+     /// The subgraph of one branch arm. Its body is the block `exec`, or what `body` builds
+     /// (called inside the arm's scope) when given; `exec` then only locates the arm.
+-    compile_graph_ptr_t buildArmGraph(
+-        const GCT::node_ptr_t &exec, const std::function<node_handle_t()> &body = {});
++    compile_graph_ptr_t
++    buildArmGraph(const GCT::node_ptr_t &exec, const std::function<node_handle_t()> &body = {});
+ 
+     // ---- The tagged forms `T?` and `T!` (design principles 2.9;
+     // docs/technical/29_nullable_and_fallible_values.md). Each construct below is a branch on
+@@ -896,8 +902,8 @@ class Builder {
+     /// a warning (NullTestNeverNull; design principles 2.13). nullptr when the call `gct` of
+     /// the operator group `group` is not that.
+     node_handle_t nullComparison(
+-        const std::string &group, const GCT::node_ptr_t &gct,
+-        const std::vector<Argument> &operands, const camel::core::type::type_vec_t &types);
++        const std::string &group, const GCT::node_ptr_t &gct, const std::vector<Argument> &operands,
++        const camel::core::type::type_vec_t &types);
+     /// The values a narrowing `if` binds its names to in the arm that excludes null: the name
+     /// `x` in the then arm of `if x != null then ...` stands for one of these (design
+     /// principles 2.11, 2.12). A lookup that finds one of these nodes found a narrowed name;
+@@ -973,7 +979,8 @@ class Builder {
+     /// Whether the generic overload `tmpl` accepts arguments of the types `normTypes`: its type
+     /// variables bind and every argument then fits its parameter (resolveGenericCall without
+     /// the diagnostics).
+-    bool genericOperatorAccepts(const template_ptr_t &tmpl, const camel::core::type::type_vec_t &normTypes);
++    bool genericOperatorAccepts(
++        const template_ptr_t &tmpl, const camel::core::type::type_vec_t &normTypes);
+     /// OperatorOverloadConflict when the overload `funcType` of the operator `group` takes
+     /// parameter types a built-in, C++ module or imported overload of it takes.
+     void rejectOperatorConflict(
+@@ -1050,14 +1057,14 @@ class Builder {
+     node_handle_t
+     applyTagOperator(const char *op, const std::string &name, const GCT::node_ptr_t &origin);
+     /// A CAST of `value` to `target`, made by the compiler (no conversion rule is consulted).
+-    node_handle_t castNodeTo(
+-        node_handle_t value, camel::core::type::Type *target, const GCT::node_ptr_t &origin);
++    node_handle_t
++    castNodeTo(node_handle_t value, camel::core::type::Type *target, const GCT::node_ptr_t &origin);
+     /// `node` where a value of type `target` is expected (design principles 2.10): `node`
+     /// itself when its type is assignable; otherwise the value put into `T?` / `T!` (one
+     /// CAST per level), `null` as a `T?`, or the empty literal `[]` given the element type of
+     /// `target`. nullptr when the value does not enter (camel::core::type::entersImplicitly).
+-    node_handle_t coerceTo(
+-        node_handle_t node, camel::core::type::Type *target, const GCT::node_ptr_t &origin);
++    node_handle_t
++    coerceTo(node_handle_t node, camel::core::type::Type *target, const GCT::node_ptr_t &origin);
+     /// The same at the exit of a branch arm already built: what `arm` gives enters `target`.
+     void coerceArmExit(
+         const compile_graph_ptr_t &arm, camel::core::type::Type *target,
+diff --git a/src/compile/gir/tree.cpp b/src/compile/gir/tree.cpp
+new file mode 100644
+index 00000000..2f5bfa91
+--- /dev/null
++++ b/src/compile/gir/tree.cpp
+@@ -0,0 +1,236 @@
++/**
++ * Copyright (c) 2024 the OpenCML Organization
++ * Camel is licensed under the MIT license: https://opensource.org/license/mit
++ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND.
++ * Author: Camel Contributors
++ * Created: Oct. 18, 2026
++ * Updated: Oct. 18, 2026
++ * Supported by: National Key Research and Development Program of China
++ */
++
++// Tree boundaries come only from the first/reference type, never from callbacks.
++#include "builder.h"
++#include "builder_support.h"
++#include "camel/core/data/primary.h"
++#include "camel/core/rtdata/struct.h"
++#include "camel/core/rtdata/tuple.h"
++#include "camel/core/type/composite/struct.h"
++#include "camel/core/type/composite/tuple.h"
++#include <numeric>
++
++namespace camel::compile::gir {
++using namespace core::type;
++using namespace core::data;
++using namespace core::error;
++namespace {
++bool internal(Type *type) {
++    if (type->code() == TypeCode::Struct)
++        return true;
++    if (type->code() != TypeCode::Tuple)
++        return false;
++    const auto *tuple = static_cast<TupleType *>(type);
++    return !tuple->isTagged() && !tuple->isCell();
++}
++size_t sizeOf(Type *type) {
++    return type->code() == TypeCode::Struct ? static_cast<StructType *>(type)->size()
++                                            : static_cast<TupleType *>(type)->size();
++}
++Type *fieldType(Type *type, size_t i) {
++    return type->code() == TypeCode::Struct ? static_cast<StructType *>(type)->typeAt(i)
++                                            : static_cast<TupleType *>(type)->typeAt(i);
++}
++std::string fieldName(Type *type, size_t i) {
++    return type->code() == TypeCode::Struct
++               ? std::string(static_cast<StructType *>(type)->fieldName(i))
++               : std::to_string(i);
++}
++std::string childPath(const std::string &path, Type *type, size_t i) {
++    return (path.empty() ? "" : path + ".") + fieldName(type, i);
++}
++} // namespace
++node_handle_t Builder::expandTreeCall(
++    const oper_group_ptr_t &ops, const std::vector<Argument> &with,
++    const std::vector<Argument> &norm, const GCT::node_ptr_t &origin) {
++    if (ops->resolvers().size() != 1)
++        return nullptr;
++    const std::string uri = ops->resolvers().front().first;
++    if (uri != "tree:tree_map" && uri != "tree:tree_reduce" && uri != "tree:tree_unzip" &&
++        uri != "tree:tree_paths" && uri != "tree:tree_leaves")
++        return nullptr;
++    const auto fail = [&](const std::string &path, const std::string &why) -> void {
++        diags_->of(SemanticDiag::ArgumentsRejected)
++            .atOrigin(origin->origin())
++            .commit(ops->name(), "tree leaf '" + (path.empty() ? "$" : path) + "'", why);
++        throw BuildAbortException();
++    };
++    const bool map = uri == "tree:tree_map", reduce = uri == "tree:tree_reduce";
++    const bool unzip = uri == "tree:tree_unzip", paths = uri == "tree:tree_paths";
++    if ((map && (with.size() != 1 || norm.empty())) ||
++        (reduce && (with.size() != 1 || norm.size() != 2)) ||
++        (unzip && (!with.empty() || norm.size() != 2)) ||
++        (!map && !reduce && !unzip && (!with.empty() || norm.size() != 1)))
++        fail("", "invalid number of tree arguments");
++
++    const auto access = [&](node_handle_t parent, size_t index) {
++        Type *type = valueTypeOf(nodeTypeOf(parent));
++        auto *out =
++            type->code() == TypeCode::Struct
++                ? currGraph_->addAccsNode(fieldType(type, index), fieldName(type, index))
++                : currGraph_->addAccsNode(fieldType(type, index), static_cast<uint32_t>(index));
++        linkNodes(LinkType::Norm, valueOf(parent), out);
++        registerTreeOrigin(out, origin, "gir.tree.access");
++        return out;
++    };
++    const auto pack = [&](Type *shape, const std::vector<node_handle_t> &values) {
++        type_vec_t types;
++        for (auto *value : values)
++            types.push_back(valueTypeOf(nodeTypeOf(value)));
++        Type *type;
++        if (shape && shape->code() == TypeCode::Struct) {
++            StructTypeFactory fields;
++            for (size_t i = 0; i < values.size(); ++i)
++                fields.add(fieldName(shape, i), types[i]);
++            type = fields.build();
++        } else {
++            type = TupleType::create(types);
++        }
++        core::mm::NoCollectionScope guard;
++        const bool tuple = type->code() == TypeCode::Tuple;
++        const slot_t empty =
++            tuple ? core::rtdata::toSlot(::Tuple::create(values.size(), core::mm::autoSpace()))
++                  : core::rtdata::toSlot(::Struct::create(values.size(), core::mm::autoSpace()));
++        auto &draft = currGraph_->draft();
++        auto *base  = draft.node(draft.materializeStaticValue(empty, type));
++        std::vector<size_t> slots(values.size());
++        std::iota(slots.begin(), slots.end(), 0);
++        auto *out = currGraph_->addFillNode(
++            type,
++            runtime::makeFillPayload(
++                tuple ? runtime::GCFillKind::Tuple : runtime::GCFillKind::Struct,
++                slots));
++        linkNodes(LinkType::Norm, base, out);
++        for (auto *value : values)
++            linkNodes(LinkType::With, valueOf(value), out);
++        registerTreeOrigin(out, origin, "gir.tree.fill");
++        return out;
++    };
++    const auto compatible = [&](Type *shape, Type *other, const std::string &path) {
++        if (!internal(other) || shape->code() != other->code() || sizeOf(shape) != sizeOf(other))
++            fail(
++                path,
++                "tree structure differs: expected " + shape->toString() + ", got " +
++                    other->toString());
++        if (shape->code() == TypeCode::Struct)
++            for (size_t i = 0; i < sizeOf(shape); ++i)
++                if (fieldName(shape, i) != fieldName(other, i))
++                    fail(childPath(path, shape, i), "tree field names or declaration order differ");
++    };
++    // A temporary names the original function value exactly once. Generic/overload
++    // DREFs remain names and the normal call builder resolves them for each leaf.
++    std::string callback;
++    if (map || reduce)
++        callback = bindTemporary(with.front().node);
++    const auto invoke = [&](const std::vector<node_handle_t> &args, const std::string &path) {
++        auto call = tree_->makeLink(args.size());
++        call->setOrigin(origin->origin());
++        auto callee = tree_->makeDRef(callback);
++        callee->setOrigin(origin->origin());
++        *call << callee;
++        for (auto *arg : args) {
++            auto ref = tree_->makeDRef(bindTemporary(valueOf(arg)));
++            ref->setOrigin(origin->origin());
++            *call << ref;
++        }
++        try {
++            return visitLinkNode(call);
++        } catch (const BuildAbortException &) {
++            std::string types;
++            for (auto *arg : args)
++                types += (types.empty() ? "" : ", ") + valueTypeOf(nodeTypeOf(arg))->toString();
++            fail(path, "callback is not applicable to (" + types + ")");
++        }
++        return node_handle_t{};
++    };
++    node_handle_t accumulator = reduce ? valueOf(norm[1].node) : nullptr;
++    Type *accumulatorType     = reduce ? valueTypeOf(nodeTypeOf(accumulator)) : nullptr;
++    std::vector<node_handle_t> leaves;
++    std::vector<std::vector<node_handle_t>> unzipLeaves;
++    size_t arity    = 0;
++    const auto walk = [&](auto &&self,
++                          Type *shape,
++                          const std::vector<node_handle_t> &values,
++                          const std::string &path) -> node_handle_t {
++        if (internal(shape)) {
++            for (auto *value : values)
++                compatible(shape, valueTypeOf(nodeTypeOf(value)), path);
++            std::vector<node_handle_t> children;
++            for (size_t i = 0; i < sizeOf(shape); ++i) {
++                std::vector<node_handle_t> inputs;
++                for (auto *value : values)
++                    inputs.push_back(access(value, i));
++                children.push_back(
++                    self(self, fieldType(shape, i), inputs, childPath(path, shape, i)));
++            }
++            return map || paths ? pack(shape, children) : nullptr;
++        }
++        if (map)
++            return invoke(values, path);
++        if (reduce) {
++            accumulator = invoke({accumulator, values.front()}, path);
++            if (!accumulatorType->assignableFrom(valueTypeOf(nodeTypeOf(accumulator))))
++                fail(
++                    path,
++                    "reducer must return its accumulator type " + accumulatorType->toString());
++        } else if (paths) {
++            auto *out = currGraph_->addStaticDataNode(std::make_shared<StringData>(path));
++            registerTreeOrigin(out, origin, "gir.tree.path");
++            return out;
++        } else if (unzip) {
++            Type *type = valueTypeOf(nodeTypeOf(values.front()));
++            if (!internal(type) || type->code() != TypeCode::Tuple)
++                fail(path, "unzip expects a tuple at every reference leaf");
++            if (unzipLeaves.empty())
++                arity = sizeOf(type);
++            else if (arity != sizeOf(type))
++                fail(path, "unzip leaf tuples have different arities");
++            std::vector<node_handle_t> fields;
++            for (size_t i = 0; i < arity; ++i)
++                fields.push_back(access(values.front(), i));
++            unzipLeaves.push_back(std::move(fields));
++        } else {
++            leaves.push_back(values.front());
++        }
++        return nullptr;
++    };
++    Type *shape = valueTypeOf(nodeTypeOf(norm[unzip ? 1 : 0].node));
++    std::vector<node_handle_t> inputs;
++    if (map)
++        for (const auto &arg : norm)
++            inputs.push_back(valueOf(arg.node));
++    else
++        inputs.push_back(valueOf(norm.front().node));
++    auto result = walk(walk, shape, inputs, "");
++    if (map || paths)
++        return result;
++    if (reduce)
++        return accumulator;
++    if (!unzip)
++        return pack(nullptr, leaves);
++    if (unzipLeaves.empty())
++        fail("", "unzip tuple arity cannot be inferred from an empty reference tree");
++    std::vector<node_handle_t> trees;
++    for (size_t component = 0; component < arity; ++component) {
++        size_t index       = 0;
++        const auto rebuild = [&](auto &&self, Type *type) -> node_handle_t {
++            if (!internal(type))
++                return unzipLeaves.at(index++).at(component);
++            std::vector<node_handle_t> fields;
++            for (size_t i = 0; i < sizeOf(type); ++i)
++                fields.push_back(self(self, fieldType(type, i)));
++            return pack(type, fields);
++        };
++        trees.push_back(rebuild(rebuild, shape));
++    }
++    return pack(nullptr, trees);
++}
++} // namespace camel::compile::gir
+diff --git a/test/cases/modules/tree_operations.cml b/test/cases/modules/tree_operations.cml
+new file mode 100644
+index 00000000..1886d564
+--- /dev/null
++++ b/test/cases/modules/tree_operations.cml
+@@ -0,0 +1,21 @@
++module tree_operations
++import { tree_map, tree_unzip, tree_reduce, tree_leaves, tree_paths } from tree
++func twice(x: typeas T): T { return x + x }
++func bump(x: int): int { return x + 1 }
++func bump(x: float): float { return x + 0.5 }
++func main(): int sync {
++    let p = { w: 3.0, block: (4.0, 5.0) }
++    println(tree_map<(a: float, b: float): float => a + b>(p, p))
++    println(tree_map<twice>({ count: 2, weight: 1.5 }))
++    println(tree_map<bump>({ count: 2, weight: 1.5 }))
++    let r = tree_map<(a: float, b: float) => (a + b, a - b, a * b)>(p, p)
++    println(tree_unzip(r, p))
++    // A secondary tree's aggregate at a reference leaf is a whole argument.
++    println(tree_map<(a: float, b: (float, float)): float => a + b.0 + b.1>(p, tree_map<(a: float) => (a, a)>(p)))
++    println(tree_reduce<(acc: float, x: float): float => acc - x>(p, 20.0))
++    println(tree_leaves(p))
++    println(tree_paths(p))
++    println(tree_map<(a: int[]): int => len(a)>({ samples: [1, 2, 3] }))
++    println(tree_reduce<(a: float, b: float): float => a + b>((10000000000000000.0, -10000000000000000.0, 1.0), 0.0))
++    return 0
++}
+diff --git a/test/cases/modules/tree_shape_error.cml b/test/cases/modules/tree_shape_error.cml
+new file mode 100644
+index 00000000..95b887f8
+--- /dev/null
++++ b/test/cases/modules/tree_shape_error.cml
+@@ -0,0 +1,6 @@
++module tree_shape_error
++import { tree_map } from tree
++func main(): int sync {
++    println(tree_map<(a: int, b: int): int => a + b>({ block: (1, 2) }, { block: 3 }))
++    return 0
++}
+diff --git a/test/cases/modules/tree_training.cml b/test/cases/modules/tree_training.cml
+new file mode 100644
+index 00000000..ae908179
+--- /dev/null
++++ b/test/cases/modules/tree_training.cml
+@@ -0,0 +1,34 @@
++module tree_training
++import { Tensor, reshape, zeros, sum, abs } from tensor
++import { value_and_grad } from autodiff
++import { tree_map, tree_reduce, tree_unzip } from tree
++import { Device, upload, download, run_device } from tiles
++type Model = { weight: Tensor<f32>, nested: (Tensor<f32>, Tensor<f32>) }
++func initialize(): Model {
++    return { weight: reshape([1.0, 2.0], [2]), nested: (reshape([3.0], [1]), zeros([0, 2])) }
++}
++func loss(p: Model): float {
++    let squared = tree_map<(x: Tensor<f32>): float => sum(x * x)>(p)
++    return tree_reduce<(a: float, b: float): float => a + b>(squared, 0.0)
++}
++func update_model(p: Model, g: Model): (Model, Model) { return update(p, g) }
++func update(p: typeas P, g: P): (P, P) {
++    let r = tree_map<(a: Tensor<f32>, b: Tensor<f32>) => (a - b * 0.01, b * 0.1)>(p, g)
++    return tree_unzip(r, p)
++}
++func main(): int sync {
++    let p = initialize()
++    let vg = value_and_grad(loss)
++    let cpu = vg(p)
++    println(cpu.0 - 14.0)
++    println(sum(abs(cpu.1.weight - p.weight * 2.0)))
++    let dp: Device<Model> = upload(p)
++    let measured = run_device<vg>(dp)
++    let changed: Device<(Model, Model)> = run_device<update_model>((dp, measured.1))
++    let actual = download(changed)
++    let expected = update(p, cpu.1)
++    println(download(measured.0) - cpu.0)
++    println(sum(abs(actual.0.weight - expected.0.weight)))
++    println(sum(abs(actual.1.nested.0 - expected.1.nested.0)))
++    return 0
++}
+diff --git a/test/plans/feat/modules/tree.plan.toml b/test/plans/feat/modules/tree.plan.toml
+new file mode 100644
+index 00000000..3b4de7ab
+--- /dev/null
++++ b/test/plans/feat/modules/tree.plan.toml
+@@ -0,0 +1,22 @@
++id = "modules.tree"
++order = 368
++tier = "feat"
++tags = ["feat", "modules", "tree"]
++
++[[tests]]
++name = "type_directed_map_unzip_and_ordered_reduce"
++kind = "behavior"
++case = "../../../cases/modules/tree_operations.cml"
++args = ["${case}", "std::macro", "std::nvm"]
++expect_exit = 0
++expect_stdout_exact = "{ w: 6.0, block: (8.0, 10.0) }\n{ count: 4, weight: 3.0 }\n{ count: 3, weight: 2.0 }\n({ w: 6.0, block: (8.0, 10.0) }, { w: 0.0, block: (0.0, 0.0) }, { w: 9.0, block: (16.0, 25.0) })\n{ w: 9.0, block: (12.0, 15.0) }\n8.0\n(3.0, 4.0, 5.0)\n{ w: w, block: (block.0, block.1) }\n{ samples: 3 }\n1.0\n"
++timeout_ms = 10000
++
++[[tests]]
++name = "shape_mismatch_reports_first_path"
++kind = "negative"
++case = "../../../cases/modules/tree_shape_error.cml"
++args = ["${case}", "std::nvm"]
++expect_exit = 1
++expect_output_contains = ["tree leaf 'block'", "tree structure differs"]
++timeout_ms = 10000
+diff --git a/test/plans/gpu/tiles_transfer.plan.toml b/test/plans/gpu/tiles_transfer.plan.toml
+index 7bb228ca..d19910ed 100644
+--- a/test/plans/gpu/tiles_transfer.plan.toml
++++ b/test/plans/gpu/tiles_transfer.plan.toml
+@@ -3,6 +3,15 @@ order = 901
+ tier = "gpu"
+ tags = ["gpu", "modules", "tiles"]
+ 
++[[tests]]
++name = "tree_expansion_autodiff_and_device_update"
++kind = "behavior"
++case = "../../cases/modules/tree_training.cml"
++args = ["${case}", "std::macro", "std::fvm"]
++expect_exit = 0
++expect_stdout_exact = "0.0\n0.0\n0.0\n0.0\n0.0\n"
++timeout_ms = 60000
++
+ [[tests]]
+ name = "device_parameter_tree_training"
+ kind = "behavior"
+-- 
+2.51.0.windows.1
+

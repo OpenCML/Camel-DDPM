@@ -1,15 +1,14 @@
 module sample_latent
-import { DeviceLD, loadLD, uploadLD } from params_ld
-import { loadAE, uploadAE } from params_ae
+import { Device, run, upload } from tiles
+import { LD, loadAE, loadLD } from parameters
 import { predict_noise, decode_image } from networks
 import { byte_features } from text_data
 import { Schedule, schedule, embedding } from ddpm
 import { Tensor, randn, seed, reshape, save_npy, set_num_threads } from tensor
 import { sqrt } from math
-import { run } from tiles
 import { save_rgb } from rgb_output
 
-func sample(p: DeviceLD, s: Schedule, x: Tensor<f32>, text: Tensor<f32>, empty: Tensor<f32>, index: int, steps: int, guidance: float): Tensor<f32> sync {
+func sample(p: Device<LD>, s: Schedule, x: Tensor<f32>, text: Tensor<f32>, empty: Tensor<f32>, index: int, steps: int, guidance: float): Tensor<f32> sync {
     return if index < 0 then x else sync {
         let t = (len(s.beta) - 1) * index / (steps - 1)
         let next_t = if index == 0 then -1 else (len(s.beta) - 1) * (index - 1) / (steps - 1)
@@ -28,8 +27,8 @@ func sample(p: DeviceLD, s: Schedule, x: Tensor<f32>, text: Tensor<f32>, empty: 
 func main(model: string, ae_path: string, out: string, prompt: string, sample_seed: int, timesteps: int, steps: int, guidance: float): int sync {
     set_num_threads(1)
     seed(sample_seed)
-    let p = uploadLD(loadLD(model))
-    let ae = uploadAE(loadAE(ae_path))
+    let p = upload(loadLD(model))
+    let ae = upload(loadAE(ae_path))
     let text = reshape(byte_features(prompt, 128), [1, 128, 259])
     let empty = reshape(byte_features('', 128), [1, 128, 259])
     let latent = sample(p, schedule(timesteps), randn([1, 64, 4]), text, empty, steps - 1, steps, guidance)
