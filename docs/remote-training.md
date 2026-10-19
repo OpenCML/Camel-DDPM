@@ -90,3 +90,14 @@ The epsilon baseline remains available using `MODEL=epsilon WIDTH=512`. The new
 objective; its loss values are not directly comparable to epsilon-MSE.
 
 No training command in this document launches a local Windows training process.
+# Server data storage
+
+All datasets and training artifacts on `88zjwei` live under `/mnt/data3/zjwei/Camel-DDPM-data/`:
+
+- `wit/`: WIT metadata, indices and images.
+- `coco2017/archives/`: official COCO image and annotation archives.
+- `project-data/`: earlier MNIST and sealed experimental corpora.
+- `project-runs/`: logs, model checkpoints and run artifacts.
+
+The code and runtime installation remain at `/home/zjwei/projects/Camel-DDPM`. Its `data` and `runs` entries are symlinks to the corresponding directories above; their contents occupy `/mnt/data3`, not the home filesystem. Preserve those links when deploying or extracting source archives. The earlier data and checkpoints were migrated on 2026-10-19.
+
