@@ -4,19 +4,31 @@
 
 参数类型与初始化现直接用 Camel 编写，通用树操作实现 Adam/EMA，不再生成参数源文件。二进制图像读写使用 `Bytes`；VAE、扩散的连续/恢复训练状态已逐字节比较，见 [基础设施实测](docs/results/tree-infrastructure-validation.json)。
 
-**生产目标尚未完成。** 已授权使用四张 RTX 3090（GPU 1、2、6、7），数据按百万至千万级有效图文对规划；当前 256 张实验不能承担该目标。下一阶段的数据、模型和四卡训练依赖见 [生产训练计划](docs/production-training.md)。本机可下载后中转，数据处理与训练仍在服务器。
+**生产目标尚未完成。** 已授权使用四张 RTX 3090（GPU 1、2、6、7），数据按百万至千万级有效图文对规划。当前已封存 COCO 2017 的 118,272 张训练图和 5,000 张验证图、共 616,692 条描述；完成 2,000 步 RGB64 VAE 基线，重建仍明显模糊，尚未启动该数据上的扩散训练。实测见 [COCO 基线报告](docs/results/coco-vae-baseline.json)。下一阶段的数据、模型和四卡训练依赖见 [生产训练计划](docs/production-training.md)。本机可下载后中转，数据处理与训练仍在服务器。
 WIT 已开始获取真实中英文图片，接入步骤与审核边界见 [图片数据流程](docs/wit-acquisition.md)。
 
-新增 [完整小型潜空间模型](docs/latent-training.md)：从零初始化的 VAE、文本 Transformer、4 层条件去噪 Transformer、BF16 矩阵乘和 FP32 Adam/EMA，使用 256 张分组划分的 CC0 图片在服务器训练。结构和恢复流程已经补齐，生成质量仍未达到生产级要求。原 RGB64 和 MNIST 原型作为回归保留。
+当前主线为 [完整小型潜空间模型](docs/latent-training.md)：从零初始化的 VAE、文本 Transformer、4 层条件去噪 Transformer、BF16 矩阵乘和 FP32 Adam/EMA。此前使用 256 张分组划分的 CC0 图片验证流程，随后扩展到 COCO VAE 基线。生成质量仍未达到生产级要求。原 RGB64 和 MNIST 原型作为回归保留。
 
-**当前状态：已在远程 RTX 3090 上跑通训练和采样，背景噪点明显减少，但仍有断笔和块状接缝。** 这个仓库首先是 Camel 能力与缺口的可复现实验。
+**早期 MNIST 结果：已在远程 RTX 3090 上跑通训练和采样，背景噪点明显减少，但仍有断笔和块状接缝。** 这个仓库首先是 Camel 能力与缺口的可复现实验。
 
 ![Remote patch-x0 model after 5,000 updates](docs/results/server-patch-5000.png)
 
 最新 RGB 实验：[批量注意力与恢复验证](docs/results/server-batched-validation.md)。MNIST 实验见 [服务器验证记录](docs/results/server-patch-validation.md)。旧 MLP 基线见下方验证结果。
 最新潜空间模型：[混合精度、256 图训练与采样结果](docs/results/server-latent-validation.md)。
 
-## 实现范围
+## 从哪里开始阅读
+
+1. [train_vae.cml](src/train_vae.cml)：从 `main` 进入初始化/恢复、取批量、GPU 求梯度、Adam、EMA 和保存，理解实际完成 COCO 基线的训练入口。
+2. [networks.cml](src/networks.cml)：沿 `ae_grad → ae_loss → encode_image/decode_image` 阅读 VAE，再沿 `ld_grad → noise_loss → predict_noise` 阅读文本条件扩散模型。
+3. [train_latent.cml](src/train_latent.cml)：查看图像编码、潜变量加噪、时间步和文本条件如何连进训练。
+4. [parameters.cml](src/parameters.cml) 与 [optim.cml](src/optim.cml)：参数树、各层形状、随机初始化，以及通用 Adam/EMA 实现。
+5. [latent_data.cml](src/latent_data.cml)、[sample_latent.cml](src/sample_latent.cml) 与 [evaluate_latent.cml](src/evaluate_latent.cml)：批量与描述采样、生成和评估。
+
+[tools/latent.py](tools/latent.py) 是宿主启动入口，仍负责分段进程与旧检查点发布；模型计算在 Camel 内。Camel 原生整树检查点已完成库层验证，尚未接入这些训练入口，不能将新库存在等同于训练入口已经迁移。
+
+88 上的项目源码是 `/home/zjwei/projects/Camel-DDPM/`；训练默认运行时为项目内 `.camel/`，Camel 开发源码在 `runtime-build/Camel/`。`data` 和 `runs` 为软链接，训练产物实际写入 `/mnt/data3/zjwei/Camel-DDPM-data/`。当前 COCO 结果为 `runs/coco-baseline-v1/`。源码通过归档/SCP 同步，服务器目录不是 Git checkout；它是实际服务器实验代码，尚无生产服务。
+
+## MNIST 原型实现范围
 
 - Camel 原生解析 MNIST IDX，归一化到 `[-1, 1]`。
 - 100 步 cosine 噪声调度、16 维正弦时间编码、两层 SiLU MLP。
