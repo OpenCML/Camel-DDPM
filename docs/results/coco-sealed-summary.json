@@ -1,0 +1,39 @@
+{
+  "captions": 616692,
+  "excluded": {
+    "duplicate_original": 14,
+    "duplicate_rgb64": 1
+  },
+  "grouping": "official splits; exact JPEG and RGB64 duplicates removed, validation first",
+  "groups": 123272,
+  "image_zip_crc": "all annotated image members verified while reading",
+  "images": 123272,
+  "languages": [
+    "en"
+  ],
+  "limit_per_split": 0,
+  "manifest_sha256": "bc6f632dbeb84487e776e69883b23b49d837aeea349b12bb826b56c5b2f50dd4",
+  "near_duplicate_check": false,
+  "preprocessing": "EXIF transpose, RGB, center crop, Lanczos 64x64",
+  "schema": 2,
+  "sealed": true,
+  "sources": {
+    "annotations_trainval2017.zip": {
+      "bytes": 252907541,
+      "sha256": "113a836d90195ee1f884e704da6304dfaaecff1f023f49b6ca93c4aaae470268",
+      "source": "https://s3.amazonaws.com/images.cocodataset.org/annotations/annotations_trainval2017.zip"
+    },
+    "train2017.zip": {
+      "bytes": 19336861798,
+      "sha256": "69a8bb58ea5f8f99d24875f21416de2e9ded3178e903f1f7603e283b9e06d929",
+      "source": "https://s3.amazonaws.com/images.cocodataset.org/zips/train2017.zip"
+    },
+    "val2017.zip": {
+      "bytes": 815585330,
+      "sha256": "4f7e2ccb2866ec5041993c9cf2a952bbed69647b115d0f74da7ce8f4bef82f05",
+      "source": "https://s3.amazonaws.com/images.cocodataset.org/zips/val2017.zip"
+    }
+  },
+  "train": 118272,
+  "validation": 5000
+}

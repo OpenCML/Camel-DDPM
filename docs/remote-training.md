@@ -101,3 +101,11 @@ All datasets and training artifacts on `88zjwei` live under `/mnt/data3/zjwei/Ca
 
 The code and runtime installation remain at `/home/zjwei/projects/Camel-DDPM`. Its `data` and `runs` entries are symlinks to the corresponding directories above; their contents occupy `/mnt/data3`, not the home filesystem. Preserve those links when deploying or extracting source archives. The earlier data and checkpoints were migrated on 2026-10-19.
 
+When updating the server build source from an archive, use GNU tar's `--touch` option:
+
+```bash
+tar --touch -xf runs/source-update.tar -C runtime-build/Camel
+```
+
+An edit made locally while a server build is running may have an earlier timestamp than an object compiled from the previous source. Preserving that timestamp can make the next incremental build reuse a stale object despite changed contents. Refresh timestamps on extraction, run the standard build, and install to a fresh runtime directory. Keep a running experiment's runtime unchanged. Mixed incremental builds are not validation evidence.
+

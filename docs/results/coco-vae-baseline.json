@@ -1,0 +1,24 @@
+{
+  "batch": 16,
+  "dataset": "/mnt/data3/zjwei/Camel-DDPM-data/coco2017/sealed-rgb64-v1",
+  "gpu": "2",
+  "initial": {
+    "images": 128,
+    "latent_mean": -0.04271486560183746,
+    "latent_second_moment": 0.05268273232247231,
+    "mse": 0.31285463916758244,
+    "objective": "heldout_reconstruction_mse"
+  },
+  "note": "Small RGB64 VAE baseline; visual review still required before diffusion training.",
+  "production_ready": false,
+  "reconstruction_mse_improved": true,
+  "stage": "complete",
+  "steps": 2000,
+  "trained": {
+    "images": 128,
+    "latent_mean": 0.47337921279975603,
+    "latent_second_moment": 4.78432468950682,
+    "mse": 0.049561733221832036,
+    "objective": "heldout_reconstruction_mse"
+  }
+}
