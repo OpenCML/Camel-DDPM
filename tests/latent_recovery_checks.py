@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from checkpoint_store import read
+from checkpoint_store import read, validate
 from model_schema import shapes
 
 
@@ -22,16 +22,19 @@ def main():
     continuous, step = read(args.continuous, expected_shapes)
     resumed, resumed_step = read(args.resumed, expected_shapes)
     assert step == resumed_step
-    first = json.loads((continuous / "state.json").read_text())["sha256"]
-    second = json.loads((resumed / "state.json").read_text())["sha256"]
-    assert first == second, "native continuation diverged"
-    with tempfile.TemporaryDirectory(prefix="camel-recovery-") as name:
+    first = validate(continuous, expected_shapes)
+    second = validate(resumed, expected_shapes)
+    assert first == second, "native model/Adam/EMA/control state continuation diverged"
+    timings = list(args.continuous.glob('train-*.timing.json'))
+    assert len(timings) == 1 and json.loads(timings[0].read_text())['native_processes'] == 1
+    assert len(list((args.continuous / 'checkpoints').glob('step-*'))) >= 2
+    with tempfile.TemporaryDirectory(prefix="camel-recovery-", dir=args.continuous.resolve().parent) as name:
         damaged = Path(name)
         shutil.copy2(args.continuous / "config.json", damaged)
         shutil.copy2(args.continuous / "latest.json", damaged)
         target = damaged / "checkpoints" / continuous.name
         shutil.copytree(continuous, target)
-        tensor = target / next(iter(first))
+        tensor = target / next(name for name in first if name.endswith('.npy'))
         contents = bytearray(tensor.read_bytes())
         contents[-1] ^= 1
         tensor.write_bytes(contents)
@@ -41,7 +44,15 @@ def main():
             pass
         else:
             raise AssertionError("corrupt tensor was accepted")
-    print(f"RECOVERY PASS kind={config['kind']} step={step} identical_tensors={len(first)} corruption_rejected=true")
+        tensor.write_bytes(bytes(contents[:-1]) + bytes([contents[-1] ^ 1]))
+        # A kill between directory publication and pointer replacement leaves a valid orphan.
+        (damaged / 'latest.json').unlink()
+        assert read(damaged, expected_shapes)[1] == step
+        pending = damaged / 'checkpoints' / ('step-' + str(step + 1) + '.pending-interrupted')
+        pending.mkdir()
+        (pending / 'manifest.json').write_text('{')
+        assert read(damaged, expected_shapes)[1] == step, 'partial directory became visible'
+    print(f"RECOVERY PASS kind={config['kind']} step={step} identical_files={len(first)} single_process=true corruption_rejected=true orphan_recovered=true")
 
 
 if __name__ == "__main__":

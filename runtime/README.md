@@ -1,5 +1,28 @@
 # Required Camel library fixes
 
+## Current native-checkpoint runtime
+
+The current server `.camel/` is the independently built `.camel-checkpoint-v3`
+distribution from Camel `13d4152a` (module ABI 3). Windows was rebuilt with the
+standard build command and the editor's private runtime was synchronized.
+Earlier statements below about workstation builds describe historical runs.
+
+`camel-native-checkpoints.patch` records `6e934aa3..13d4152a`: explicit
+`f::<T>` calls, result-type propagation, and atomic typed `nn.save_tree/load_tree`
+with exact tensor bytes, manifest hashes and strict validation. It requires the
+preceding tree/Bytes changes and exact tensor-byte support in `6e934aa3`.
+Skip patches whose commits are already present. Rebuild all native modules for
+ABI 3 through the standard build command; do not copy individual old modules.
+
+Actual VAE/diffusion training, migration and restart checks are recorded in
+[`native-checkpoint-validation.json`](../docs/results/native-checkpoint-validation.json).
+The verified source/runtime snapshots are on 88 under
+`/home/zjwei/projects/Camel-DDPM-history/native-checkpoints-v1`; the original
+COCO baseline is frozen separately under `cc99f31`. Their datasets and training
+outputs remain under `/mnt/data3/zjwei/Camel-DDPM-data/`.
+
+## Earlier runtime changes
+
 The validated project-local installation was built from Camel `1555bf5b`
 (development version 0.2.14) with the fixes in
 [`camel-ddpm-primitives.patch`](camel-ddpm-primitives.patch).

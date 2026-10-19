@@ -1,6 +1,7 @@
 module sample_latent
 import { Device, run, upload } from tiles
-import { LD, loadAE, loadLD } from parameters
+import { LD } from parameters
+import { loadAE, loadLD } from model_store
 import { predict_noise, decode_image } from networks
 import { byte_features } from text_data
 import { Schedule, schedule, embedding } from ddpm
@@ -24,11 +25,11 @@ func sample(p: Device<LD>, s: Schedule, x: Tensor<f32>, text: Tensor<f32>, empty
         return sample(p, s, next, text, empty, index - 1, steps, guidance)
     }
 }
-func main(model: string, ae_path: string, out: string, prompt: string, sample_seed: int, timesteps: int, steps: int, guidance: float): int sync {
+func main(model: string, weights: string, ae_path: string, out: string, prompt: string, sample_seed: int, timesteps: int, steps: int, guidance: float): int sync {
     set_num_threads(1)
     seed(sample_seed)
-    let p = upload(loadLD(model))
-    let ae = upload(loadAE(ae_path))
+    let p = upload(loadLD(model, weights))
+    let ae = upload(loadAE(ae_path, 'model'))
     let text = reshape(byte_features(prompt, 128), [1, 128, 259])
     let empty = reshape(byte_features('', 128), [1, 128, 259])
     let latent = sample(p, schedule(timesteps), randn([1, 64, 4]), text, empty, steps - 1, steps, guidance)

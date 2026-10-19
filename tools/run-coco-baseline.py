@@ -45,7 +45,7 @@ def main():
         latent.train(SimpleNamespace(stage='vae', dataset=dataset, out=out / 'vae',
                      gpu=args.gpu, steps=args.steps, batch=args.batch, seed=20261019,
                      rate=0.0001, timesteps=100, autoencoder=None, checkpoint_every=100,
-                     segment_timeout=3600, resume=False))
+                     timeout=0, resume=False))
         update('evaluating_vae')
         for initial in (True, False):
             latent.evaluate(SimpleNamespace(run=out / 'vae', out=out / ('initial' if initial else 'trained'),

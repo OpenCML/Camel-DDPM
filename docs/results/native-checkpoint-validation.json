@@ -1,0 +1,83 @@
+{
+  "date": "2026-10-19",
+  "host": "88zjwei",
+  "physical_gpu": 2,
+  "camel_commit": "13d4152a",
+  "production_ready": false,
+  "workflow_validation_only": true,
+  "source_runtime_snapshot": "/home/zjwei/projects/Camel-DDPM-history/native-checkpoints-v1",
+  "snapshot_matching_fingerprints": 61,
+  "run_root": "/mnt/data3/zjwei/Camel-DDPM-data/project-runs",
+  "dataset": {
+    "path": "/mnt/data3/zjwei/Camel-DDPM-data/coco2017/sealed-rgb64-v1",
+    "train_images": 118272,
+    "validation_images": 5000,
+    "captions": 616692,
+    "manifest_sha256": "bc6f632dbeb84487e776e69883b23b49d837aeea349b12bb826b56c5b2f50dd4"
+  },
+  "legacy_vae_migration": {
+    "run": "coco-native-migration-v1",
+    "step": 2000,
+    "tensor_files": 176,
+    "all_tensor_files_byte_identical": true,
+    "native_manifest_sha256": "092b9ef56bdeb777900e8cf0a01ae582441ec7aa52d9f09a05ace977ff0c3a10",
+    "heldout_images": 128,
+    "heldout_mse": 0.049561733221832036,
+    "heldout_metrics_equal_to_legacy": true
+  },
+  "vae_restart": {
+    "continuous_run": "native-vae-continuous-v1",
+    "resumed_run": "native-vae-resumed-v1",
+    "continuous_steps": 6,
+    "restart_steps": [2, 4],
+    "batch": 2,
+    "seed": 20261019,
+    "identical_state_files": 181,
+    "continuous_processes": 1,
+    "continuous_pid": 252381,
+    "continuous_wall_seconds": 35.08803708999949,
+    "published_steps": [2, 4, 6],
+    "corruption_rejected": true,
+    "missing_pointer_recovered": true,
+    "pending_directory_ignored": true
+  },
+  "diffusion_restart": {
+    "continuous_run": "native-ld-continuous-v1",
+    "resumed_run": "native-ld-resumed-v1",
+    "continuous_steps": 4,
+    "restart_steps": [2, 2],
+    "batch": 2,
+    "seed": 20261019,
+    "identical_state_files": 349,
+    "continuous_processes": 1,
+    "continuous_pid": 256958,
+    "continuous_wall_seconds": 42.8133878990011,
+    "published_steps": [2, 4],
+    "corruption_rejected": true,
+    "missing_pointer_recovered": true,
+    "pending_directory_ignored": true
+  },
+  "sampling": {
+    "run": "native-ld-sample-v1",
+    "prompt": "一只红色的杯子 a red cup",
+    "ddim_steps": 4,
+    "exit_code": 0,
+    "artifacts": ["latent.npy", "sample.npy", "sample.ppm", "sha256.json"],
+    "visual_quality_reviewed": false
+  },
+  "diffusion_evaluation": {
+    "run": "native-ld-eval-v1",
+    "objective": "heldout_latent_noise_mse",
+    "mse": 0.896217328786615,
+    "images": 2,
+    "times_per_image": 3
+  },
+  "remaining": [
+    "stateless device random numbers",
+    "complete device-resident training step and transfer statistics",
+    "full mixed precision",
+    "memory profiling, recomputation and gradient accumulation",
+    "data shard prefetch and four-GPU distributed training",
+    "large-scale Chinese/English data and production quality evaluation"
+  ]
+}

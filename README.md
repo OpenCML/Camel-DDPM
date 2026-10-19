@@ -4,7 +4,7 @@
 
 参数类型与初始化现直接用 Camel 编写，通用树操作实现 Adam/EMA，不再生成参数源文件。二进制图像读写使用 `Bytes`；VAE、扩散的连续/恢复训练状态已逐字节比较，见 [基础设施实测](docs/results/tree-infrastructure-validation.json)。
 
-**生产目标尚未完成。** 已授权使用四张 RTX 3090（GPU 1、2、6、7），数据按百万至千万级有效图文对规划。当前已封存 COCO 2017 的 118,272 张训练图和 5,000 张验证图、共 616,692 条描述；完成 2,000 步 RGB64 VAE 基线，重建仍明显模糊，尚未启动该数据上的扩散训练。实测见 [COCO 基线报告](docs/results/coco-vae-baseline.json)。下一阶段的数据、模型和四卡训练依赖见 [生产训练计划](docs/production-training.md)。本机可下载后中转，数据处理与训练仍在服务器。
+**生产目标尚未完成。** 已授权使用四张 RTX 3090（GPU 1、2、6、7），数据按百万至千万级有效图文对规划。当前已封存 COCO 2017 的 118,272 张训练图和 5,000 张验证图、共 616,692 条描述；完成 2,000 步 RGB64 VAE 基线，重建仍明显模糊；扩散目前只完成该数据索引上的 4 步流程验证，尚未进行正式长训。实测见 [COCO 基线报告](docs/results/coco-vae-baseline.json)。下一阶段的数据、模型和四卡训练依赖见 [生产训练计划](docs/production-training.md)。本机可下载后中转，数据处理与训练仍在服务器。
 WIT 已开始获取真实中英文图片，接入步骤与审核边界见 [图片数据流程](docs/wit-acquisition.md)。
 
 当前主线为 [完整小型潜空间模型](docs/latent-training.md)：从零初始化的 VAE、文本 Transformer、4 层条件去噪 Transformer、BF16 矩阵乘和 FP32 Adam/EMA。此前使用 256 张分组划分的 CC0 图片验证流程，随后扩展到 COCO VAE 基线。生成质量仍未达到生产级要求。原 RGB64 和 MNIST 原型作为回归保留。
@@ -24,7 +24,9 @@ WIT 已开始获取真实中英文图片，接入步骤与审核边界见 [图�
 4. [parameters.cml](src/parameters.cml) 与 [optim.cml](src/optim.cml)：参数树、各层形状、随机初始化，以及通用 Adam/EMA 实现。
 5. [latent_data.cml](src/latent_data.cml)、[sample_latent.cml](src/sample_latent.cml) 与 [evaluate_latent.cml](src/evaluate_latent.cml)：批量与描述采样、生成和评估。
 
-[tools/latent.py](tools/latent.py) 是宿主启动入口，仍负责分段进程与旧检查点发布；模型计算在 Camel 内。Camel 原生整树检查点已完成库层验证，尚未接入这些训练入口，不能将新库存在等同于训练入口已经迁移。
+[tools/latent.py](tools/latent.py) 是宿主启动入口，当前一次启动由单个 Camel 进程完成全部目标更新。训练入口已接入 `nn.save_tree/load_tree`，由 Camel 原子发布模型、Adam、EMA、步数及数据/配置身份；Python 负责启动、锁和完整性校验。VAE 连续/恢复的 181 个状态文件、扩散的 349 个状态文件分别逐字节一致，迁移的 176 个 VAE 张量保持原始字节；采样和评估入口也已验证。见 [原生检查点验证](docs/results/native-checkpoint-validation.json)。短跑仅验证流程，不能证明生成质量。
+
+服务器当前 `.camel/` 使用 Camel `13d4152a` 的原生检查点运行时。旧 COCO 基线源码/运行时保存在 `/home/zjwei/projects/Camel-DDPM-history/cc99f31`，本次验证快照保存在 `/home/zjwei/projects/Camel-DDPM-history/native-checkpoints-v1`；历史配置绑定指纹，须使用对应快照复现。已迁移的 2,000 步 VAE 在 `runs/coco-native-migration-v1/`。设备无状态随机数、完整设备常驻训练步、完整 AMP 和四卡分布式训练仍未完成。
 
 88 上的项目源码是 `/home/zjwei/projects/Camel-DDPM/`；训练默认运行时为项目内 `.camel/`，Camel 开发源码在 `runtime-build/Camel/`。`data` 和 `runs` 为软链接，训练产物实际写入 `/mnt/data3/zjwei/Camel-DDPM-data/`。当前 COCO 结果为 `runs/coco-baseline-v1/`。源码通过归档/SCP 同步，服务器目录不是 Git checkout；它是实际服务器实验代码，尚无生产服务。
 

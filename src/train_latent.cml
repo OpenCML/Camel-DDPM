@@ -1,28 +1,37 @@
 module train_latent
 import { emaLD, normLD, scaleLD, stepLD } from parameter_ops
-import { zero_tree } from optim
 import { Device, download, run, run_device, upload } from tiles
-import { AE, LD, initLD, loadAE, loadLD } from parameters
+import { AE, LD, initLD } from parameters
+import { loadAE } from model_store
+import { Schedule, schedule, embedding } from ddpm
+import { Snapshot, initial, require_state, publish } from training_state
+import { load_tree } from nn
 import { ld_grad, image_mean } from networks
 import { train_batch } from latent_data
 import { Tensor, seed, randn, set_num_threads } from tensor
 import { seed as random_seed, randint } from random
 import { read_text } from fs
 import { trim, split } from str
-import { save_params } from nn
-import { Schedule, schedule, embedding } from ddpm
 import { sqrt } from math
 
 type State = { p: Device<LD>, m: Device<LD>, v: Device<LD>, ema: Device<LD> }
-func train(state: State, ae: Device<AE>, ids: string[], data: string, s: Schedule, i: int, end: int, batch: int, initial_seed: int, rate: float): State sync {
-    return if i == end then state else sync {
+func restore(path: string, initial_seed: int, dataset_sha: string, config_sha: string): Snapshot<LD> sync {
+    let loaded = load_tree::<Snapshot<LD>>(path, dataset_sha)
+    return match loaded {
+        case error e => sync { println(e); exit(1); return initial(initLD(), initial_seed, dataset_sha, config_sha) }
+        case s => s
+    }
+}
+func train(s: State, ae: Device<AE>, schedule: Schedule, ids: string[], data: string, out: string, start: int, end: int, every: int,
+           batch: int, initial_seed: int, rate: float, dataset_sha: string, config_sha: string): State sync {
+    return loop state = s for i in range(start, end) do sync {
         seed(initial_seed + i + 1)
         random_seed(initial_seed + i + 1)
         let input = train_batch(ids, data, batch)
         let clean = run<image_mean>((ae, input.image))
         let noise = randn([batch, 64, 4])
-        let t = randint(0, len(s.beta) - 1)
-        let x = clean * sqrt(s.abar[t]) + noise * sqrt(1.0 - s.abar[t])
+        let t = randint(0, len(schedule.beta) - 1)
+        let x = clean * sqrt(schedule.abar[t]) + noise * sqrt(1.0 - schedule.abar[t])
         let vg = run_device<ld_grad>((state.p, x, input.text, embedding(t) as Tensor<f32>, noise))
         let value = download(vg.0)
         let norm = sqrt(download(run_device<normLD>(vg.1)))
@@ -30,23 +39,27 @@ func train(state: State, ae: Device<AE>, ids: string[], data: string, s: Schedul
         let clipped = run_device<scaleLD>((vg.1, if norm > 1.0 then 1.0 / norm else 1.0))
         let next = run_device<stepLD>((state.p, clipped, state.m, state.v, rate, 1.0 - 0.9 ^ float(i + 1), 1.0 - 0.999 ^ float(i + 1)))
         let ema = run_device<emaLD>((state.ema, next.0))
-        if i % 10 == 0 || i + 1 == end then sync { println('LATENT step={} noise_mse={} t={} grad_norm={}'->format<i + 1, value, t, norm>) }
-        return train({ p: next.0, m: next.1, v: next.2, ema: ema }, ae, ids, data, s, i + 1, end, batch, initial_seed, rate)
+        if i % 10 == 0 || i + 1 == end then sync { println('LATENT step={} noise_mse={} grad_norm={}'->format<i + 1, value, norm>) }
+        if (i + 1) % every == 0 || i + 1 == end then sync {
+            publish(out, {
+                model: download(next.0), adam_m: download(next.1), adam_v: download(next.2), ema: download(ema),
+                step: i + 1, seed: initial_seed, data_cursor: i + 1,
+                dataset_sha256: dataset_sha, config_sha256: config_sha
+            })
+        }
+        return { p: next.0, m: next.1, v: next.2, ema: ema }
     }
 }
-func main(data: string, index: string, out: string, resume: string, ae_path: string, start: int, end: int, batch: int, initial_seed: int, rate: float, timesteps: int): int sync {
+func main(data: string, index: string, out: string, resume: string, ae_path: string, start: int, end: int,
+          checkpoint_every: int, batch: int, initial_seed: int, rate: float, timesteps: int, dataset_sha: string, config_sha: string): int sync {
     set_num_threads(1)
     seed(initial_seed)
-    let p = if resume == '' then initLD() else loadLD(resume + '/model/')
-    let m = if resume == '' then zero_tree(p) else loadLD(resume + '/adam_m/')
-    let v = if resume == '' then zero_tree(p) else loadLD(resume + '/adam_v/')
-    let ema = if resume == '' then p else loadLD(resume + '/ema/')
-    let ae = upload(loadAE(ae_path))
+    let loaded = if resume == '' then initial(initLD(), initial_seed, dataset_sha, config_sha)
+                 else restore(resume, initial_seed, dataset_sha, config_sha)
+    let s = require_state(loaded, start, initial_seed, dataset_sha, config_sha)
+    let ae = upload(loadAE(ae_path, 'model'))
     let ids = read_text(index)->trim->split<'\n'>
-    let result = train({ p: upload(p), m: upload(m), v: upload(v), ema: upload(ema) }, ae, ids, data, schedule(timesteps), start, end, batch, initial_seed, rate)
-    save_params(download(result.p), out + '/model')
-    save_params(download(result.m), out + '/adam_m')
-    save_params(download(result.v), out + '/adam_v')
-    save_params(download(result.ema), out + '/ema')
+    let _ = train({ p: upload(s.model), m: upload(s.adam_m), v: upload(s.adam_v), ema: upload(s.ema) },
+                  ae, schedule(timesteps), ids, data, out, s.step, end, checkpoint_every, batch, s.seed, rate, dataset_sha, config_sha)
     return 0
 }

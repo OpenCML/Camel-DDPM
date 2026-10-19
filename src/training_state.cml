@@ -1,0 +1,37 @@
+// Training state is an ordinary typed tree; the native library owns publication.
+module training_state
+import { zero_tree } from optim
+import { save_tree } from nn
+import { read_bytes, replace } from fs
+import { encode } from bytes
+import { sha256 } from crypto
+
+export type Snapshot<P> = {
+    model: P, adam_m: P, adam_v: P, ema: P,
+    step: int, seed: int, data_cursor: int,
+    dataset_sha256: string, config_sha256: string
+}
+export func initial(p: typeas P, initial_seed: int, dataset_sha: string, config_sha: string): Snapshot<P> {
+    return {
+        model: p, adam_m: zero_tree(p), adam_v: zero_tree(p), ema: p,
+        step: 0, seed: initial_seed, data_cursor: 0,
+        dataset_sha256: dataset_sha, config_sha256: config_sha
+    }
+}
+export func require_state(s: Snapshot<typeas P>, start: int, initial_seed: int, dataset_sha: string, config_sha: string): Snapshot<P> sync {
+    if s.step != start || s.data_cursor != start || s.seed != initial_seed ||
+       s.dataset_sha256 != dataset_sha || s.config_sha256 != config_sha then sync {
+        println('Checkpoint identity, seed, step or data cursor differs from this run')
+        exit(1)
+    }
+    return s
+}
+export func publish(out: string, s: Snapshot<typeas P>): int sync {
+    let name = 'step-' + string(s.step)
+    let path = out + '/checkpoints/' + name
+    save_tree(path, s, s.dataset_sha256)
+    let digest = sha256(read_bytes(path + '/manifest.json'))
+    replace(out + '/latest.json', encode('{"checkpoint":"' + name + '","manifest_sha256":"' + digest + '"}\n'))
+    println('CHECKPOINT step={} path={}'->format<s.step, path>)
+    return s.step
+}

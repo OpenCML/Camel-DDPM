@@ -1,0 +1,19 @@
+module model_store
+import { AE, LD, initAE, initLD } from parameters
+import { Snapshot } from training_state
+import { load_tree } from nn
+
+export func loadAE(path: string, weights: string): AE sync {
+    let loaded = load_tree::<Snapshot<AE>>(path)
+    return match loaded {
+        case error e => sync { println(e); exit(1); return initAE() }
+        case s => if weights == 'ema' then s.ema else s.model
+    }
+}
+export func loadLD(path: string, weights: string): LD sync {
+    let loaded = load_tree::<Snapshot<LD>>(path)
+    return match loaded {
+        case error e => sync { println(e); exit(1); return initLD() }
+        case s => if weights == 'ema' then s.ema else s.model
+    }
+}

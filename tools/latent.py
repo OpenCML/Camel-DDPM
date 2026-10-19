@@ -10,8 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
-import uuid
-from checkpoint_store import atomic_json, read, publish
+from checkpoint_store import atomic_json, read, validate
 from model_schema import shapes, count
 from text_image_runtime import PROJECT, digest, run_native
 
@@ -62,62 +61,80 @@ def indexes(dataset, run):
 def autoencoder_reference(path):
     path = path.resolve()
     config = json.loads((path / "config.json").read_text())
-    if config["stage"] != "vae" or config["fingerprints"] != fingerprints():
+    if config["schema"] != 3 or config["stage"] != "vae" or config["fingerprints"] != fingerprints():
         raise ValueError("autoencoder has incompatible source/runtime identity")
     checkpoint, step = read(path, shapes("AE"))
     return {"run": str(path), "checkpoint": str(checkpoint), "step": step,
-        "state_sha256": digest(checkpoint / "state.json"), "config_sha256": digest(path / "config.json")}
+        "manifest_sha256": digest(checkpoint / "manifest.json"), "config_sha256": digest(path / "config.json")}
+
+
+def data_path(path):
+    storage = Path('/mnt/data3/zjwei/Camel-DDPM-data').resolve(strict=True)
+    target = path.resolve()
+    if not target.is_relative_to(storage):
+        raise ValueError('training data and outputs must be on /mnt/data3: ' + str(target))
+    return target
+
+
+def training_config(args, summary, ae=None, migration=None):
+    gpu_uuid = subprocess.check_output(['nvidia-smi', '-i', args.gpu, '--query-gpu=uuid', '--format=csv,noheader'], text=True).strip()
+    config = {'schema': 3, 'architecture': 'latent64-transformer-v1', 'stage': args.stage,
+        'kind': kind(args.stage), 'parameters': count(kind(args.stage)), 'dataset': str(args.dataset.resolve()),
+        'dataset_summary': summary, 'seed': args.seed, 'rate': args.rate, 'batch': args.batch,
+        'timesteps': args.timesteps, 'autoencoder': ae, 'gpu_uuid': gpu_uuid,
+        'precision': 'BF16 GEMM / FP32 boundaries, master weights, reductions and Adam',
+        'rng': 'seed+global-step+1', 'gradient_clip_l2': 1.0, 'ema_decay': 0.999,
+        'checkpoint_format': 'native-tree-v1', 'fingerprints': fingerprints(), 'production_ready': False}
+    if migration is not None:
+        config['migration'] = migration
+    return config
 
 
 def train(args):
-    run = args.out.resolve()
+    run = data_path(args.out)
     run.mkdir(parents=True, exist_ok=True)
-    with (run / "writer.lock").open("w") as lock:
+    with (run / 'writer.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        dataset = args.dataset.resolve()
+        dataset = data_path(args.dataset)
         summary = indexes(dataset, run)
-        ae = autoencoder_reference(args.autoencoder) if args.stage == "diffusion" else None
-        gpu_uuid = subprocess.check_output(["nvidia-smi", "-i", args.gpu, "--query-gpu=uuid", "--format=csv,noheader"], text=True).strip()
-        config = {"schema": 2, "architecture": "latent64-transformer-v1", "stage": args.stage,
-            "kind": kind(args.stage), "parameters": count(kind(args.stage)), "dataset": str(dataset),
-            "dataset_summary": summary, "seed": args.seed, "rate": args.rate, "batch": args.batch,
-            "timesteps": args.timesteps, "autoencoder": ae, "gpu_uuid": gpu_uuid,
-            "precision": "BF16 GEMM / FP32 boundaries, master weights, reductions and Adam",
-            "rng": "seed+global-step+1", "gradient_clip_l2": 1.0, "ema_decay": 0.999,
-            "fingerprints": fingerprints(), "production_ready": False}
-        path = run / "config.json"
+        ae = autoencoder_reference(args.autoencoder) if args.stage == 'diffusion' else None
+        path = run / 'config.json'
+        existing = json.loads(path.read_text()) if path.exists() else None
+        config = training_config(args, summary, ae, existing.get('migration') if existing and args.resume else None)
         if args.resume:
-            if json.loads(path.read_text()) != config:
-                raise ValueError("resume source/runtime/data/autoencoder/hyperparameter identity changed")
-            previous, start = read(run, shapes(config["kind"])) if (run / "latest.json").exists() else (None, 0)
+            if existing != config:
+                raise ValueError('resume source/runtime/data/autoencoder/hyperparameter identity changed')
+            published = list((run / 'checkpoints').glob('step-*'))
+            previous, start = read(run, shapes(config['kind'])) if published else (None, 0)
         else:
-            if path.exists(): raise ValueError("run exists; use --resume or a fresh output")
+            if existing is not None:
+                raise ValueError('run exists; use --resume or a fresh output')
             atomic_json(path, config)
             previous, start = None, 0
-        if args.steps <= start: raise ValueError("target must exceed the saved global step")
-        (run / "checkpoints").mkdir(exist_ok=True)
-        while start < args.steps:
-            end = min(start + args.checkpoint_every, args.steps)
-            stage = run / "checkpoints" / (".pending-" + uuid.uuid4().hex)
-            stage.mkdir()
-            parameters = {"data": dataset, "index": run / "train_ids.txt", "out": stage,
-                "resume": previous if previous else "", "start": start, "end": end,
-                "batch": args.batch, "initial_seed": args.seed, "rate": args.rate}
-            if ae:
-                parameters.update(ae_path=ae["checkpoint"] + "/model/", timesteps=args.timesteps)
-            started = time.monotonic()
-            run_native("src/train_vae.cml" if args.stage == "vae" else "src/train_latent.cml",
-                       parameters, stage / "train.log", args.gpu, timeout=args.segment_timeout)
-            atomic_json(stage / "timing.json", {"wall_seconds": time.monotonic() - started,
-                "updates": end - start, "includes_initialization_compile_and_checkpoint_write": True})
-            previous = publish(run, stage, end, shapes(config["kind"]))
-            start = end
-            print("Published " + str(previous), flush=True)
-
+        if args.steps <= start:
+            raise ValueError('target must exceed the saved global step')
+        (run / 'checkpoints').mkdir(exist_ok=True)
+        parameters = {'data': dataset, 'index': run / 'train_ids.txt', 'out': run,
+            'resume': previous if previous else '', 'start': start, 'end': args.steps,
+            'checkpoint_every': args.checkpoint_every, 'batch': args.batch, 'initial_seed': args.seed,
+            'rate': args.rate, 'dataset_sha': summary['manifest_sha256'], 'config_sha': digest(path)}
+        if ae:
+            parameters.update(ae_path=ae['checkpoint'], timesteps=args.timesteps)
+        log = run / ('train-' + str(start) + '-' + str(args.steps) + '-' + str(time.time_ns()) + '.log')
+        execution = run_native('src/train_vae.cml' if args.stage == 'vae' else 'src/train_latent.cml',
+            parameters, log, args.gpu, timeout=args.timeout or None)
+        checkpoint, step = read(run, shapes(config['kind']))
+        if step != args.steps:
+            raise ValueError('Camel did not publish the target training step')
+        atomic_json(log.with_suffix('.timing.json'), {**execution, 'updates': step - start,
+            'native_processes': 1, 'includes_initialization_compile_and_checkpoint_write': True})
+        print('Completed native training through ' + str(checkpoint), flush=True)
 
 def load_run(path):
     path = path.resolve()
     config = json.loads((path / "config.json").read_text())
+    if config["schema"] != 3:
+        raise ValueError("legacy run requires explicit migration or its archived source/runtime")
     if config["fingerprints"] != fingerprints():
         raise ValueError("source/runtime identity changed")
     checkpoint, step = read(path, shapes(config["kind"]))
@@ -126,17 +143,17 @@ def load_run(path):
 
 def evaluate(args):
     run, config, checkpoint, step = load_run(args.run)
-    out = args.out.resolve()
+    out = data_path(args.out)
     out.mkdir(parents=True, exist_ok=False)
     ae = config["autoencoder"]
     if ae:
-        if digest(Path(ae["checkpoint"]) / "state.json") != ae["state_sha256"]:
+        if digest(Path(ae["checkpoint"]) / "manifest.json") != ae["manifest_sha256"]:
             raise ValueError("autoencoder checkpoint changed")
         read(Path(ae["run"]), shapes("AE"))
     atomic_json(out / "evaluation.json", {"run": str(run), "step": step, "weights": args.weights,
         "initialization_baseline": args.initial, "validation_ids_sha256": digest(run / "validation_ids.txt")})
-    run_native("src/evaluate_latent.cml", {"stage": config["stage"], "model": "" if args.initial else str(checkpoint / args.weights) + "/",
-        "ae_path": ae["checkpoint"] + "/model/" if ae else "", "data": config["dataset"],
+    run_native("src/evaluate_latent.cml", {"stage": config["stage"], "model": "" if args.initial else str(checkpoint), "weights": args.weights,
+        "ae_path": ae["checkpoint"] if ae else "", "data": config["dataset"],
         "index": run / "validation_ids.txt", "out": out, "count": args.count,
         "initial_seed": config["seed"], "timesteps": config["timesteps"]}, out / "evaluate.log", args.gpu, timeout=600)
 
@@ -146,17 +163,17 @@ def sample(args):
     if config["stage"] != "diffusion": raise ValueError("sampling requires a trained diffusion checkpoint")
     ae = config["autoencoder"]
     reference = Path(ae["checkpoint"])
-    if digest(reference / "state.json") != ae["state_sha256"]:
+    if digest(reference / "manifest.json") != ae["manifest_sha256"]:
         raise ValueError("autoencoder checkpoint changed")
-    from checkpoint_store import validate
-    if validate(reference, shapes("AE")) != json.loads((reference / "state.json").read_text())["sha256"]:
-        raise ValueError("autoencoder tensor corruption")
-    out = args.out.resolve()
+    if digest(Path(ae["run"]) / "config.json") != ae["config_sha256"]:
+        raise ValueError("autoencoder configuration changed")
+    validate(reference, shapes("AE"))
+    out = data_path(args.out)
     out.mkdir(parents=True, exist_ok=False)
     atomic_json(out / "sample.json", {"run": str(run), "step": step, "weights": args.weights,
         "prompt": args.prompt, "seed": args.seed, "sampler": "DDIM eta=0", "steps": args.steps,
         "guidance": args.guidance, "config_sha256": digest(run / "config.json"), "production_ready": False})
-    run_native("src/sample_latent.cml", {"model": str(checkpoint / args.weights) + "/", "ae_path": str(reference / "model") + "/",
+    run_native("src/sample_latent.cml", {"model": str(checkpoint), "weights": args.weights, "ae_path": str(reference),
         "out": out, "prompt": args.prompt, "sample_seed": args.seed, "steps": args.steps,
         "timesteps": config["timesteps"], "guidance": args.guidance}, out / "sample.log", args.gpu, timeout=600)
     atomic_json(out / "sha256.json", {name: digest(out / name) for name in ("latent.npy", "sample.npy", "sample.ppm")})
@@ -176,7 +193,7 @@ def main():
     training.add_argument("--seed", type=int, default=20261018)
     training.add_argument("--rate", type=float, default=0.0001)
     training.add_argument("--timesteps", type=int, default=100)
-    training.add_argument("--segment-timeout", type=int, default=1800)
+    training.add_argument("--timeout", type=int, default=0, help="Total process deadline in seconds; 0 disables it")
     training.add_argument("--resume", action="store_true")
     training.set_defaults(action=train)
     evaluation = commands.add_parser("evaluate")
@@ -198,11 +215,12 @@ def main():
     for command in (training, evaluation, sampling): command.add_argument("--gpu", default="2")
     args = parser.parse_args()
     if args.command == "train":
-        if min(args.steps, args.batch, args.checkpoint_every, args.segment_timeout) < 1 or args.timesteps < 2 or args.seed < 0 or not math.isfinite(args.rate) or args.rate <= 0:
+        if min(args.steps, args.batch, args.checkpoint_every) < 1 or args.timeout < 0 or args.timesteps < 2 or args.seed < 0 or not math.isfinite(args.rate) or args.rate <= 0:
             parser.error("invalid training sizes, seed or rate")
         if args.stage == "diffusion" and not args.autoencoder: parser.error("diffusion needs --autoencoder")
     if args.command == "evaluate" and args.count < 1: parser.error("count must be positive")
     if args.command == "sample" and (args.steps < 2 or args.seed < 0 or not math.isfinite(args.guidance) or args.guidance < 0): parser.error("invalid sampler settings")
+    if args.gpu not in ('1', '2', '6', '7'): parser.error('GPU has not been authorized')
     args.action(args)
 
 

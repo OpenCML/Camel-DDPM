@@ -1,0 +1,35 @@
+// One-time schema-2 import. Active training never loads individual legacy leaves.
+module migrate_latent
+import { AE, LD, initAE, initLD } from parameters
+import { Tensor, load_npy, set_num_threads } from tensor
+import { tree_paths, tree_map } from tree
+import { publish } from training_state
+
+func legacyAE(path: string): AE sync {
+    let paths = tree_paths(initAE())
+    return tree_map<(leaf: string): Tensor<f32> => load_npy(path + '/' + leaf + '.npy') as Tensor<f32>>(paths)
+}
+func legacyLD(path: string): LD sync {
+    let paths = tree_paths(initLD())
+    return tree_map<(leaf: string): Tensor<f32> => load_npy(path + '/' + leaf + '.npy') as Tensor<f32>>(paths)
+}
+func main(model_kind: string, legacy: string, out: string, step: int, initial_seed: int, dataset_sha: string, config_sha: string): int sync {
+    set_num_threads(1)
+    return if model_kind == 'AE' then sync {
+        let _ = publish(out, {
+            model: legacyAE(legacy + '/model'), adam_m: legacyAE(legacy + '/adam_m'),
+            adam_v: legacyAE(legacy + '/adam_v'), ema: legacyAE(legacy + '/ema'),
+            step: step, seed: initial_seed, data_cursor: step,
+            dataset_sha256: dataset_sha, config_sha256: config_sha
+        })
+        return 0
+    } else sync {
+        let _ = publish(out, {
+            model: legacyLD(legacy + '/model'), adam_m: legacyLD(legacy + '/adam_m'),
+            adam_v: legacyLD(legacy + '/adam_v'), ema: legacyLD(legacy + '/ema'),
+            step: step, seed: initial_seed, data_cursor: step,
+            dataset_sha256: dataset_sha, config_sha256: config_sha
+        })
+        return 0
+    }
+}

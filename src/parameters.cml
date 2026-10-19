@@ -1,8 +1,7 @@
 // Model shapes and initialization are explicit Camel code; tree operations are generic.
 module parameters
-import { Tensor, randn, zeros, ones, load_npy } from tensor
+import { Tensor, randn, zeros, ones } from tensor
 import { sqrt } from math
-import { tree_map, tree_paths } from tree
 
 export type Att = {
     q: Tensor<f32>,
@@ -134,12 +133,3 @@ export func initLD(): LD {
     }
 }
 
-export func loadAE(path: string): AE sync {
-    let paths = tree_paths(initAE())
-    return tree_map<(leaf: string): Tensor<f32> => load_npy(path + leaf + '.npy') as Tensor<f32>>(paths)
-}
-
-export func loadLD(path: string): LD sync {
-    let paths = tree_paths(initLD())
-    return tree_map<(leaf: string): Tensor<f32> => load_npy(path + leaf + '.npy') as Tensor<f32>>(paths)
-}

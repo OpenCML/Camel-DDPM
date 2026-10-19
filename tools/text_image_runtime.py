@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import threading
+import time
 
 PROJECT = Path(__file__).resolve().parents[1]
 
@@ -36,11 +37,16 @@ def run_native(source, arguments, log, gpu, timeout=600):
     command += [source, "std::macro", "std::fvm"]
     # Stream output, retaining the exact command outcome in a separate run log.
     with Path(log).open("x", encoding="utf-8") as stream:
+        started = time.monotonic()
         process = subprocess.Popen(command, cwd=PROJECT, env=environment(gpu),
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        deadline = threading.Timer(timeout, process.kill)
-        deadline.daemon = True
-        deadline.start()
+        stream.write("CAMEL_PROCESS pid=" + str(process.pid) + "\n")
+        stream.flush()
+        print("CAMEL_PROCESS pid=" + str(process.pid), flush=True)
+        deadline = threading.Timer(timeout, process.kill) if timeout is not None else None
+        if deadline:
+            deadline.daemon = True
+            deadline.start()
         try:
             for line in process.stdout:
                 print(line, end="", flush=True)
@@ -52,6 +58,7 @@ def run_native(source, arguments, log, gpu, timeout=600):
             process.wait(timeout=10)
             raise
         finally:
-            deadline.cancel()
+            if deadline: deadline.cancel()
     if code:
         raise RuntimeError("Camel exited with code " + str(code) + ": " + source)
+    return {"pid": process.pid, "wall_seconds": time.monotonic() - started, "exit_code": code}
