@@ -10,4 +10,33 @@ python tools/fetch-coco-archives.py
 
 本机不解码图片、不训练。服务器后续执行压缩包 CRC、图片解码、描述非空/关联检查和重复检查，保留官方训练/验证划分；同一图片的五条描述不能跨划分。这些是自动数据校验，不要求逐张人工审核。
 
-当前仅开始下载和传输，不把压缩包大小、描述数或队列数计为训练图片数。COCO 是下一阶段扩大训练和衡量图文学习的基础数据，英文覆盖和数量本身仍不足以支持生产级通用中英文目标；WIT 作为后续多语言补充。
+三个压缩包已完整传至服务器。使用以下命令封存训练数据（仅在服务器执行）：
+
+```bash
+python tools/prepare-coco.py \
+  --archives /mnt/data3/zjwei/Camel-DDPM-data/coco2017/archives \
+  --out /mnt/data3/zjwei/Camel-DDPM-data/coco2017/sealed-rgb64-v1
+```
+
+工具先复核传输清单的 SHA-256，再读取标注并校验 ZIP CRC。每张被标注的图片在读取时校验 CRC、完整解码、核对尺寸，以 EXIF 方向校正、RGB 转换、中心裁剪和 Lanczos 缩放产生 64×64 像素。输出保留原始 ZIP 成员定位、图片 license、来源 URL 和全部非空描述。训练由 Camel 随机选择该图的一条描述，验证固定使用第一条；同图描述共享划分。
+
+按官方验证集、训练集顺序处理，去掉原始 JPEG 或处理后 RGB64 完全重复的图片，优先保留验证图片。排除项逐条记录。此版本不声称完成近似重复检测。导入期间写入 `.pending` 目录，全部成功后才封存并改名；损坏图片或缺失标注会中止，不会静默忽略。`--limit-per-split 32` 用于先手动检查接口，不是正式数据集。
+
+COCO 是下一阶段扩大训练和衡量图文学习的基础数据，英文覆盖和数量本身仍不足以支持生产级通用中英文目标；WIT 作为后续多语言补充。当前 RGB64 也是现有小模型的输入规格，不能据此声称已具备高分辨率生产能力。
+
+## 服务器基线实验
+
+2026-10-19，先手动导入每个划分 32 张图片，得到 64 张独立图片和 320 条描述。物理 GPU 2 上的 Camel VAE 两步训练损失为 `0.3179970307283277`、`0.23560036841630538`，梯度范数为 `0.07875252483192208`、`0.08122877845989863`，检查点成功发布。此项仅验证新数据格式和多描述采样接口。
+
+完整导入与 VAE 基线由以下服务器任务执行，日志、状态和检查点均在数据盘，断开 SSH 不会终止任务：
+
+```bash
+python -u tools/run-coco-baseline.py \
+  --dataset /mnt/data3/zjwei/Camel-DDPM-data/coco2017/sealed-rgb64-v1 \
+  --out /mnt/data3/zjwei/Camel-DDPM-data/project-runs/coco-baseline-v1 \
+  --gpu 2 --steps 2000 --batch 16
+```
+
+任务先完成全部导入，再从随机权重执行 2,000 步 VAE 更新，每 100 步保存检查点。之后分别评估同样 128 张验证图片的随机初始化和训练结果，输出重建 MSE、潜变量矩及四组重建对照图片。累计 32,000 次随机图像抽取不等于遍历一遍训练集。任务不会根据训练 loss 自动宣称模型质量，也不会在未检查 VAE 重建效果前自动开始扩散训练。
+
+实时状态位于 `project-runs/coco-baseline-v1/status.json`，完整日志位于 `project-runs/coco-baseline-v1.log`。`complete` 指本次基线实验完成，`production_ready` 保持 `false`。
